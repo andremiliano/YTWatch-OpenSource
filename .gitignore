@@ -1,0 +1,34 @@
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.xcarchive
+
+# Build
+build/
+
+# CocoaPods / SPM
+Pods/
+.build/
+.swiftpm/
+
+# macOS
+.DS_Store
+*.swp
+
+# Server cache
+.ytwatch_cache/
+__pycache__/
+*.pyc
+
+# Downloads (audio files — don't commit these)
+Downloads/
+
+# Secrets — never commit
+Config/Secrets.xcconfig

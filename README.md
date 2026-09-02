@@ -32,8 +32,8 @@ Because this app utilizes internal APIs and downloads audio for offline playback
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/YTWatch.git
-   cd YTWatch
+   git clone https://github.com/andremiliano/YTWatch-OpenSource.git
+   cd YTWatch-OpenSource
    ```
 2. **Generate the Xcode Project:**
    ```bash

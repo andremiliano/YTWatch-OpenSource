@@ -81,7 +81,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 let url = Self.audioDirectory.appendingPathComponent("\(id).m4a")
                 // Fast check every launch: size catches truncated/interrupted downloads.
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                if size < 20_000 {
+                if !AudioFileGate.isValid(sizeBytes: size) {
                     corrupt.append(id)
                     continue
                 }
@@ -198,18 +198,20 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     }
 
     func availableTrackIds() -> Set<String>? {
-        var ids = Set<String>()
-        if let enumerator = fm.enumerator(at: Self.audioDirectory, includingPropertiesForKeys: nil, options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]) {
-            for case let url as URL in enumerator {
-                if url.pathExtension == "m4a" {
-                    ids.insert(url.deletingPathExtension().lastPathComponent)
-                }
-            }
-            return ids
-        } else {
+        guard let enumerator = fm.enumerator(at: Self.audioDirectory, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]) else {
             print("[Receiver] Error reading directory or directory does not exist.")
             return nil
         }
+        var entries: [(id: String, sizeBytes: Int)] = []
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "m4a" else { continue }
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            entries.append((id: url.deletingPathExtension().lastPathComponent, sizeBytes: size))
+        }
+        // Truncated/partially-written files are filtered here so they never enter the
+        // shuffle/play queue — playTrack would reject them anyway, but only after
+        // they're already selected, which chains into skip/crash loops.
+        return AudioFileGate.filterValid(entries)
     }
 
     // Filter playlists to only tracks actually on device
@@ -693,7 +695,7 @@ extension WatchFileReceiver: WCSessionDelegate {
                 try fm.copyItem(at: fileURL, to: destURL)
                 // Verify file is non-empty
                 let size = (try? destURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                wroteSuccessfully = size > 100_000
+                wroteSuccessfully = AudioFileGate.isValid(sizeBytes: size)
             } catch {
                 print("[Receiver] BT write failed for \(transfer.track.videoId): \(error.localizedDescription)")
                 wroteSuccessfully = false
@@ -778,7 +780,7 @@ extension WatchFileReceiver: WCSessionDelegate {
                 for case let url as URL in enumerator {
                     guard url.pathExtension == "m4a" else { continue }
                     let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                    if size > 100_000 {
+                    if AudioFileGate.isValid(sizeBytes: size) {
                         ids.append(url.deletingPathExtension().lastPathComponent)
                     }
                 }
@@ -804,6 +806,12 @@ extension WatchFileReceiver: WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
         handleIncomingMessage(userInfo)
+    }
+
+    /// Clean up the temp inventory_<uuid>.json written for syncVerify once WCSession
+    /// has finished sending it — this is the only outgoing transferFile on the Watch side.
+    nonisolated func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
+        try? FileManager.default.removeItem(at: fileTransfer.file.fileURL)
     }
 
     private nonisolated func handleIncomingMessage(_ msg: [String: Any], replyHandler: (@Sendable ([String: Any]) -> Void)? = nil) {

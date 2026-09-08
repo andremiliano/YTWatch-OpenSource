@@ -113,8 +113,7 @@ final class WatchPlayer: ObservableObject {
     private var playbackGeneration: Int = 0
     private var sessionActivated = false
     // Stall detection — catches tracks where container duration > actual audio
-    private var lastObservedTime: Double = -1
-    private var stallTicks: Int = 0
+    private var stallDetector = StallDetector()
     private var stallTimer: Timer?
     /// The known duration from track metadata (API-sourced, accurate).
     /// Separate from `duration` which may be overwritten by AVPlayer container duration.
@@ -264,8 +263,7 @@ final class WatchPlayer: ObservableObject {
                let url = WatchFileReceiver.shared.audioURL(for: track.videoId) {
                 knownTrackDuration = track.durationSeconds > 0 ? Double(track.durationSeconds) : 0
                 if duration <= 0 { duration = knownTrackDuration }
-                lastObservedTime = -1
-                stallTicks = 0
+                stallDetector.reset()
                 playbackGeneration += 1
                 activateSessionAndPlay(url: url, generation: playbackGeneration)
             }
@@ -467,7 +465,7 @@ final class WatchPlayer: ObservableObject {
         // Verify file is not empty/truncated before handing it to AVPlayer.
         // A truncated m4a is the main way a bad file can destabilize playback.
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-        guard fileSize > 20_000 else {
+        guard AudioFileGate.isValid(sizeBytes: fileSize) else {
             // Too small to be real audio — delete it and ask the phone to re-send.
             WatchFileReceiver.shared.deleteCorruptAudioFile(videoId: track.videoId)
             WatchFileReceiver.shared.requestRedownload(videoIds: [track.videoId])
@@ -486,8 +484,7 @@ final class WatchPlayer: ObservableObject {
         knownTrackDuration = track.durationSeconds > 0 ? Double(track.durationSeconds) : 0
         duration = knownTrackDuration
         currentTime = 0
-        lastObservedTime = -1
-        stallTicks = 0
+        stallDetector.reset()
 
         // Haptic + toast on track change
         haptic(.click)
@@ -633,25 +630,20 @@ final class WatchPlayer: ObservableObject {
         stallTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isPlaying, self.currentTrack != nil else { return }
-                guard let player = self.player, player.rate > 0 else { return } // Do not stall-skip if system paused it
+                guard let player = self.player, player.rate > 0 else {
+                    // System paused/ducked playback (route change, brief throttle, etc) —
+                    // see StallDetector.reset() for why this must not count as a stall.
+                    self.stallDetector.reset()
+                    return
+                }
 
-                let t = player.currentTime().seconds
-                guard !t.isNaN else { return } // player not ready yet — don't sample
-                if t > 1.0, self.lastObservedTime >= 0, abs(t - self.lastObservedTime) < 0.05 {
-                    self.stallTicks += 1
-                    
-                    // If we're within 15 seconds of the end, it's likely a padded-container stall. (2 seconds to detect)
-                    // If we're mid-track, it might be a CPU lag or corrupt file. Give it 5 seconds before skipping.
-                    let isNearEnd = self.duration > 0 && (self.duration - t) < 15.0
-                    let threshold = isNearEnd ? 4 : 10
-                    
-                    if self.stallTicks >= threshold {
-                        self.stallTicks = 0
-                        self.handleTrackFinished(generation: self.playbackGeneration)
-                    }
-                } else {
-                    self.stallTicks = 0
-                    self.lastObservedTime = t
+                let outcome = self.stallDetector.tick(
+                    time: player.currentTime().seconds,
+                    metadataDuration: self.duration,
+                    assetDuration: self.playerItem?.duration.seconds
+                )
+                if outcome == .stalled {
+                    self.handleTrackFinished(generation: self.playbackGeneration)
                 }
             }
         }
@@ -675,9 +667,9 @@ final class WatchPlayer: ObservableObject {
             needsNowPlayingUpdate = true
         }
 
-        // NOTE: do NOT touch `lastObservedTime` here — it is owned exclusively by the
+        // NOTE: do NOT feed `stallDetector` here — it is owned exclusively by the
         // stall timer, which compares consecutive samples of its own. If this periodic
-        // observer also refreshed it, the two 0.5s timers can drift into phase and the
+        // observer also ticked it, the two 0.5s timers can drift into phase and the
         // stall check sees "no progress" against a value just set to ~now → false stall
         // → tracks skip mid-play. Keep the two mechanisms independent.
 

@@ -743,6 +743,9 @@ extension WatchSyncManager: WCSessionDelegate {
                     self.handleSyncInventory(watchTrackIds: ids)
                 }
             }
+            // WCSession hands us the file already copied into our Inbox — it won't
+            // clean this up on its own, so remove it now that we've read it.
+            try? FileManager.default.removeItem(at: file.fileURL)
         }
     }
 

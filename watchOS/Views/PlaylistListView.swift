@@ -248,7 +248,7 @@ struct PlaylistListView: View {
                     } else {
                         Button {
                             isRefreshing = true
-                            receiver.rescanFiles()
+                            receiver.rescanFiles(force: true)
                             Task {
                                 try? await Task.sleep(nanoseconds: 600_000_000)
                                 withAnimation { isRefreshing = false }

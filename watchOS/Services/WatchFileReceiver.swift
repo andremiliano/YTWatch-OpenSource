@@ -170,7 +170,20 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         audioURL(for: videoId) != nil
     }
 
-    func rescanFiles() {
+    private var lastRescanDate: Date?
+    /// Matches the cooldown iOS's LibraryStore.refreshIfStale() uses for the same reason:
+    /// this view's .onAppear fires on every root-view re-composition (launch, returning
+    /// from Now Playing/Settings, etc. — watchOS recomposes more eagerly than iOS), and
+    /// without a cooldown each one re-ran a full directory scan + JSON reload right as
+    /// the user was likely about to tap a track.
+    private static let rescanCooldown: TimeInterval = 300
+
+    /// - Parameter force: bypass the cooldown — used by the manual pull/refresh button.
+    func rescanFiles(force: Bool = false) {
+        if !force, let last = lastRescanDate, Date().timeIntervalSince(last) < Self.rescanCooldown {
+            return
+        }
+        lastRescanDate = Date()
         loadPlaylistsFromDisk()
 
         // Discover audio files on disk not in any playlist
@@ -225,11 +238,26 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             return
         }
         _cachedTrackIds = ids
+        rebuildCachedAvailablePlaylists(using: ids)
+    }
+
+    private func rebuildCachedAvailablePlaylists(using ids: Set<String>) {
         cachedAvailablePlaylists = playlists.compactMap { playlist -> Playlist? in
             var p = playlist
             p.tracks = playlist.tracks.filter { ids.contains($0.videoId) }
             return p.tracks.isEmpty ? nil : p
         }
+    }
+
+    /// Re-derives `cachedAvailablePlaylists` from the current `_cachedTrackIds` — no disk
+    /// scan. Use this after a metadata-only change to `playlists` (e.g. healing a track's
+    /// duration) that can't change which files are actually on disk, instead of
+    /// `refreshAvailable()`'s full directory rescan. That distinction matters here: this
+    /// runs from WatchPlayer's `.readyToPlay` handler on effectively every track start for
+    /// any legacy download with a missing duration, so a full rescan there was blocking
+    /// `player.play()` on a synchronous scan of the whole library right at playback start.
+    func syncCachedAvailablePlaylistsFromMemory() {
+        rebuildCachedAvailablePlaylists(using: cachedOrFreshTrackIds())
     }
 
     /// Cached available track IDs — avoids disk scan per call
@@ -298,7 +326,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         // Skip if already have this track
         guard audioURL(for: videoId) == nil else {
             sendDownloadResult(videoId: videoId, success: true)
-            upsertTrackIntoPlaylist(payload)
+            upsertTrackIntoPlaylistDeferred(payload)
+            scheduleLibraryFlush()
             return
         }
 
@@ -357,7 +386,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                     }
                 }
 
-                upsertTrackIntoPlaylist(payload)
+                upsertTrackIntoPlaylistDeferred(payload)
+                scheduleLibraryFlush()
                 syncedTrackCount += 1
 
                 print("[Receiver] WiFi download ✓ \(payload.track.title) (\(syncedTrackCount)/\(syncTotalCount))")
@@ -367,9 +397,6 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 print("[Receiver] WiFi download ✘ \(videoId): \(error.localizedDescription)")
                 sendDownloadResult(videoId: videoId, success: false)
             }
-
-            _cachedTrackIds = nil
-            refreshAvailable()
 
             // Decrement and process next queued download
             self.receivingCount = max(0, self.receivingCount - 1)
@@ -394,7 +421,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             // Skip if already downloaded while queued
             if audioURL(for: next.track.videoId) != nil {
                 sendDownloadResult(videoId: next.track.videoId, success: true)
-                upsertTrackIntoPlaylist(next)
+                upsertTrackIntoPlaylistDeferred(next)
+                scheduleLibraryFlush()
                 continue
             }
             startDirectDownload(next)
@@ -402,7 +430,14 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         }
     }
 
-    private func upsertTrackIntoPlaylist(_ payload: DirectDownloadPayload) {
+    /// In-memory-only variant of `upsertTrackIntoPlaylist` — no disk write, no directory
+    /// rescan. Direct WiFi downloads can complete in a fast burst (multiple concurrent
+    /// downloads, or a long run of "already downloaded, just attach metadata" skips), and
+    /// each one used to trigger a full savePlaylistsToDisk() + refreshAvailable() — the
+    /// exact same "N operations -> N disk writes + N directory scans -> Watch crash" bug
+    /// already fixed once for the playlistIndex path via upsertPlaylistsBatch (see
+    /// didReceiveApplicationContext). Callers must pair this with scheduleLibraryFlush().
+    private func upsertTrackIntoPlaylistDeferred(_ payload: DirectDownloadPayload) {
         if var playlist = playlists.first(where: { $0.id == payload.playlistId }) {
             if !playlist.tracks.contains(where: { $0.videoId == payload.track.videoId }) {
                 let idx = payload.indexInPlaylist
@@ -412,7 +447,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                     playlist.tracks.append(payload.track)
                 }
             }
-            upsertPlaylist(playlist)
+            upsertPlaylistDeferred(playlist)
         } else {
             let newPlaylist = Playlist(
                 id: payload.playlistId,
@@ -420,7 +455,25 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 thumbnailURL: nil,
                 tracks: [payload.track]
             )
-            upsertPlaylist(newPlaylist)
+            upsertPlaylistDeferred(newPlaylist)
+        }
+    }
+
+    private var libraryFlushPending = false
+
+    /// Coalesces bursts of upsertTrackIntoPlaylistDeferred calls into a single
+    /// savePlaylistsToDisk() + refreshAvailable() ~300ms after the last one, instead of
+    /// doing that expensive work per-track.
+    private func scheduleLibraryFlush() {
+        guard !libraryFlushPending else { return }
+        libraryFlushPending = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard self.libraryFlushPending else { return }
+            self.libraryFlushPending = false
+            self.savePlaylistsToDisk()
+            self._cachedTrackIds = nil
+            self.refreshAvailable()
         }
     }
 
@@ -599,7 +652,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         }
         if changed {
             savePlaylistsToDisk()
-            refreshAvailable()
+            syncCachedAvailablePlaylistsFromMemory()
         }
     }
 

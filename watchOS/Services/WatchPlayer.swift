@@ -586,6 +586,13 @@ final class WatchPlayer: ObservableObject {
                 switch status {
                 case .readyToPlay:
                     self.consecutiveFailures = 0 // successful start resets the skip guard
+                    // Start audio immediately — everything below is bookkeeping that must
+                    // never delay the moment playback actually begins.
+                    self.player?.play()
+                    self.player?.volume = self.currentVolume
+                    self.isPlaying = true
+                    self.updateNowPlaying()
+                    self.saveLastPlayed()
                     // Heal old-version downloads (durationSeconds=0) from the asset's duration.
                     if self.knownTrackDuration <= 0, !dur.isNaN, dur > 0 {
                         self.duration = dur
@@ -593,11 +600,6 @@ final class WatchPlayer: ObservableObject {
                             WatchFileReceiver.shared.updateTrackDuration(videoId: vid, duration: Int(dur.rounded()))
                         }
                     }
-                    self.player?.play()
-                    self.player?.volume = self.currentVolume
-                    self.isPlaying = true
-                    self.updateNowPlaying()
-                    self.saveLastPlayed()
                     let artworkGen = capturedGen
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 1_500_000_000)

@@ -19,8 +19,11 @@ settings:
   base:
     SWIFT_VERSION: "6.0"
     ENABLE_STRICT_CONCURRENCY_CHECKING: complete
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    # Keep these in step with what's uploaded: the archive passes
+    # CURRENT_PROJECT_VERSION on the command line, and App Store Connect rejects any
+    # build number it has already seen, so bump this here whenever a build ships.
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "52"
   configs:
     Debug:
       ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT: YES

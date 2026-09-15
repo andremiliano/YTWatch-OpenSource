@@ -24,8 +24,10 @@
 		5A69A0747999140453D9A3C6 /* TrackListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4580F7CA038CF86CA4DBA2FB /* TrackListView.swift */; };
 		5AD2CED0684E3091D42BCBD8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3B30DDF4D35160407C00C07A /* Assets.xcassets */; };
 		5C14E2D53DA9CC84842ECB94 /* PlaybackQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C03C258165F72071B8FD365 /* PlaybackQueue.swift */; };
+		69ACDA257894C7B59F474605 /* AppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FD54B0BD7691A9980B56B7D /* AppVersion.swift */; };
 		6E0B30196F1E0E6CDA51693A /* AudioFileGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBB2A63FF5FB9CA83203FE03 /* AudioFileGate.swift */; };
 		72BDE1E56AE58BF3BC435F96 /* WatchPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86D2B9954FCE584D6F5A9B6B /* WatchPlayer.swift */; };
+		787B551119AEB5BCA0AAD83E /* AppVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4FD54B0BD7691A9980B56B7D /* AppVersion.swift */; };
 		8F7B450D7CAE0C4329369A7F /* AudioFileGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBB2A63FF5FB9CA83203FE03 /* AudioFileGate.swift */; };
 		95A875AC0EAE037DF456C4AC /* Track.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F6ACB4AC24B6431D70A9B37 /* Track.swift */; };
 		9B553DA97C8281F85D6F9B96 /* DownloadsListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08AD581FF386A5EB6AFECD31 /* DownloadsListView.swift */; };
@@ -81,6 +83,7 @@
 		346FF76E5A956D803B4E7C7A /* WatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchApp.swift; sourceTree = "<group>"; };
 		3B30DDF4D35160407C00C07A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		4580F7CA038CF86CA4DBA2FB /* TrackListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackListView.swift; sourceTree = "<group>"; };
+		4FD54B0BD7691A9980B56B7D /* AppVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersion.swift; sourceTree = "<group>"; };
 		557111319ED3FF3B6D01FB88 /* ForYouView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForYouView.swift; sourceTree = "<group>"; };
 		563E4B56A2D3BEAB2A830620 /* WatchSyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchSyncManager.swift; sourceTree = "<group>"; };
 		59FA3BF8065286B952EEB1F7 /* WatchMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMessage.swift; sourceTree = "<group>"; };
@@ -125,6 +128,7 @@
 			isa = PBXGroup;
 			children = (
 				0E8949CC32342A8066F1D80C /* Models */,
+				4FD54B0BD7691A9980B56B7D /* AppVersion.swift */,
 				DBB2A63FF5FB9CA83203FE03 /* AudioFileGate.swift */,
 				1C03C258165F72071B8FD365 /* PlaybackQueue.swift */,
 				7846728B0949FF7FF53B2FB7 /* StallDetector.swift */,
@@ -351,6 +355,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				787B551119AEB5BCA0AAD83E /* AppVersion.swift in Sources */,
 				6E0B30196F1E0E6CDA51693A /* AudioFileGate.swift in Sources */,
 				9E4D5D5D4B9D9511C7AAC8E2 /* NowPlayingView.swift in Sources */,
 				5C14E2D53DA9CC84842ECB94 /* PlaybackQueue.swift in Sources */,
@@ -373,6 +378,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				69ACDA257894C7B59F474605 /* AppVersion.swift in Sources */,
 				55EBC80454E68F35F8BE0526 /* ArtistView.swift in Sources */,
 				B7AA014D1886782F9D4A5549 /* AudioDownloader.swift in Sources */,
 				8F7B450D7CAE0C4329369A7F /* AudioFileGate.swift in Sources */,
@@ -457,7 +463,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 52;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_CONCURRENCY_CHECKING = complete;
@@ -471,7 +477,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.1.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -567,7 +573,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 52;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_CONCURRENCY_CHECKING = complete;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -587,7 +593,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.1.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

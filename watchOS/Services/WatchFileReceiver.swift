@@ -178,36 +178,49 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     /// the user was likely about to tap a track.
     private static let rescanCooldown: TimeInterval = 300
 
-    /// - Parameter force: bypass the cooldown — used by the manual pull/refresh button.
+    /// - Parameter force: bypass the cooldown — used by the manual refresh button.
+    ///
+    /// Deliberately does NOT reload playlists from disk: this process is the only writer,
+    /// so memory is always at least as fresh as the file, and re-reading it here would
+    /// discard deferred upserts that haven't flushed yet (a pending flush would then
+    /// persist the clobbered array, losing just-synced tracks).
     func rescanFiles(force: Bool = false) {
-        if !force, let last = lastRescanDate, Date().timeIntervalSince(last) < Self.rescanCooldown {
-            return
+        let scanIsStale = force || lastRescanDate.map { Date().timeIntervalSince($0) >= Self.rescanCooldown } ?? true
+        if scanIsStale {
+            lastRescanDate = Date()
+            refreshAvailable() // the expensive part: full directory enumeration
         }
-        lastRescanDate = Date()
-        loadPlaylistsFromDisk()
+        adoptOrphanedTracks()
+    }
 
-        // Discover audio files on disk not in any playlist
+    /// Re-attach audio files that exist on disk but appear in no playlist.
+    ///
+    /// Never cooldown-gated: these are precisely the files `cleanupOrphanedFiles()`
+    /// deletes, so throttling recovery while deletion runs freely would destroy
+    /// downloads whose metadata was lost. Cheap — reuses the cached id set.
+    private func adoptOrphanedTracks() {
+        // Never adopt mid-sync. A download writes its audio file and only adds the
+        // playlist entry after the thumbnail fetch, so during that window the file is
+        // legitimately "orphaned" — adopting there would add a duplicate raw-videoId
+        // entry to Unsorted alongside the real album a moment later.
+        guard receivingCount == 0, directDownloadQueue.isEmpty else { return }
+
         let knownIds = Set(playlists.flatMap { $0.tracks.map(\.videoId) })
-        let onDisk = availableTrackIds() ?? []
-        let orphaned = onDisk.subtracting(knownIds)
+        let orphaned = cachedOrFreshTrackIds().subtracting(knownIds)
+        guard !orphaned.isEmpty else { return }
 
-        if !orphaned.isEmpty {
-            // Add orphaned tracks to an "Unsorted" playlist
-            let unsortedId = "__unsorted__"
-            var unsorted = playlists.first(where: { $0.id == unsortedId }) ?? Playlist(
-                id: unsortedId, title: "Unsorted", thumbnailURL: nil, tracks: []
+        let unsortedId = "__unsorted__"
+        var unsorted = playlists.first(where: { $0.id == unsortedId }) ?? Playlist(
+            id: unsortedId, title: "Unsorted", thumbnailURL: nil, tracks: []
+        )
+        for videoId in orphaned where !unsorted.tracks.contains(where: { $0.videoId == videoId }) {
+            unsorted.tracks.append(
+                Track(id: videoId, videoId: videoId, title: videoId, artist: "Unknown", durationSeconds: 0)
             )
-            for videoId in orphaned {
-                if !unsorted.tracks.contains(where: { $0.videoId == videoId }) {
-                    let track = Track(id: videoId, videoId: videoId, title: videoId, artist: "Unknown", durationSeconds: 0)
-                    unsorted.tracks.append(track)
-                }
-            }
-            upsertPlaylist(unsorted)
-            print("[Receiver] Found \(orphaned.count) orphaned audio files, added to Unsorted")
         }
-
-        refreshAvailable()
+        upsertPlaylistDeferred(unsorted)
+        flushLibraryNow() // recovery is rare and must survive an immediate suspend
+        print("[Receiver] Adopted \(orphaned.count) orphaned audio files into Unsorted")
     }
 
     func availableTrackIds() -> Set<String>? {
@@ -395,6 +408,11 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
             } catch {
                 print("[Receiver] WiFi download ✘ \(videoId): \(error.localizedDescription)")
+                // The destination is removed before the move, so a failed move leaves no
+                // file where the cache may still claim one exists. Re-derive availability
+                // from disk, or the queue keeps selecting a track that isn't there.
+                self.invalidateAvailabilityCache()
+                self.syncCachedAvailablePlaylistsFromMemory()
                 sendDownloadResult(videoId: videoId, success: false)
             }
 
@@ -403,7 +421,11 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             self.directDownloadCount = max(0, self.directDownloadCount - 1)
             self.processNextDirectDownload()
 
-            if self.receivingCount == 0 {
+            if self.receivingCount == 0 && self.directDownloadQueue.isEmpty {
+                // Terminal point of the burst: persist now instead of trusting the
+                // debounce, which the app can be suspended inside of.
+                self.flushLibraryNow()
+
                 // Clear sync progress after a delay
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if self.receivingCount == 0 {
@@ -459,22 +481,62 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         }
     }
 
-    private var libraryFlushPending = false
+    /// True when `playlists` holds changes that haven't been written to disk yet.
+    private var libraryDirty = false
+    private var libraryFlushTask: Task<Void, Never>?
+    /// Latest moment the pending flush is allowed to slip to. Without this, a *trailing*
+    /// debounce can be starved indefinitely by a continuous stream of changes.
+    private var libraryFlushDeadline: Date?
+    private static let libraryFlushDebounce: TimeInterval = 0.3
+    private static let libraryFlushMaxDelay: TimeInterval = 2.0
 
-    /// Coalesces bursts of upsertTrackIntoPlaylistDeferred calls into a single
-    /// savePlaylistsToDisk() + refreshAvailable() ~300ms after the last one, instead of
-    /// doing that expensive work per-track.
+    /// Coalesces a burst of deferred playlist mutations into ONE
+    /// savePlaylistsToDisk() + refreshAvailable().
+    ///
+    /// This is a *trailing* debounce: every new change pushes the flush out, so a burst
+    /// collapses into a single write after it goes quiet. (A leading-edge timer instead
+    /// fires every 300ms for the whole burst — i.e. a full JSON encode + full directory
+    /// enumeration ~3x/sec on the main actor during a re-sync, which is the cost this is
+    /// supposed to avoid.) `libraryFlushMaxDelay` caps the slip so a long continuous
+    /// burst still persists progress.
     private func scheduleLibraryFlush() {
-        guard !libraryFlushPending else { return }
-        libraryFlushPending = true
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard self.libraryFlushPending else { return }
-            self.libraryFlushPending = false
-            self.savePlaylistsToDisk()
-            self._cachedTrackIds = nil
-            self.refreshAvailable()
+        libraryDirty = true
+        let now = Date()
+        if libraryFlushDeadline == nil {
+            libraryFlushDeadline = now.addingTimeInterval(Self.libraryFlushMaxDelay)
         }
+        let deadline = libraryFlushDeadline ?? now.addingTimeInterval(Self.libraryFlushMaxDelay)
+        let delay = min(Self.libraryFlushDebounce, max(0, deadline.timeIntervalSince(now)))
+
+        libraryFlushTask?.cancel()
+        libraryFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.flushLibraryNow()
+        }
+    }
+
+    /// Persist pending in-memory playlist changes immediately. Cheap no-op when nothing
+    /// is pending. Call at every terminal point of a sync burst and when the app
+    /// backgrounds — the debounce alone is not a durability guarantee, since the app can
+    /// be suspended inside the debounce window with files on disk but no metadata saved.
+    func flushLibraryNow() {
+        libraryFlushTask?.cancel()
+        libraryFlushTask = nil
+        libraryFlushDeadline = nil
+        guard libraryDirty else { return }
+        libraryDirty = false
+        savePlaylistsToDisk()
+        _cachedTrackIds = nil
+        refreshAvailable()
+    }
+
+    /// Drop the cached availability set so the next query re-reads the directory. Used
+    /// when a file turns out to be missing/removed behind the cache's back — a stale
+    /// cache keeps feeding the play queue a track that isn't there, which burns through
+    /// the skip guard and stops playback mid-session.
+    func invalidateAvailabilityCache() {
+        _cachedTrackIds = nil
     }
 
     private func sendDownloadResult(videoId: String, success: Bool) {
@@ -520,21 +582,17 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     private func upsertPlaylist(_ playlist: Playlist) {
         // ID match → REPLACE (caller is authoritative for that playlist's full state).
         // File-receive path always passes the FULL augmented playlist, so no loss here.
-        if let idx = playlists.firstIndex(where: { $0.id == playlist.id }) {
-            playlists[idx] = playlist
-        }
-        // No ID match but same TITLE exists → MERGE into existing (the duplicate fix).
-        else if let idx = playlists.firstIndex(where: { Self.normalizeTitle($0.title) == Self.normalizeTitle(playlist.title) }) {
-            playlists[idx] = mergeTracks(into: playlists[idx], from: playlist)
-        } else {
-            playlists.append(playlist)
-        }
-        savePlaylistsToDisk()
-        _cachedTrackIds = nil
-        refreshAvailable()
+        upsertPlaylistDeferred(playlist)
+        // Flushing through the shared path also cancels any debounced flush already in
+        // flight, so it can't fire a second redundant write + directory scan right after.
+        flushLibraryNow()
     }
 
+    /// Mutates `playlists` in memory only. Marks the library dirty so every terminal
+    /// flush point (end of a sync burst, app backgrounding) knows there's something to
+    /// write, even if the caller forgot to schedule a debounced flush.
     private func upsertPlaylistDeferred(_ playlist: Playlist) {
+        libraryDirty = true
         if let idx = playlists.firstIndex(where: { $0.id == playlist.id }) {
             playlists[idx] = playlist
         }
@@ -559,9 +617,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         }
         // Final pass: dedupe any pre-existing same-name playlists
         consolidateDuplicateTitles()
-        savePlaylistsToDisk()
-        _cachedTrackIds = nil
-        refreshAvailable()
+        libraryDirty = true
+        flushLibraryNow()
     }
 
     /// Merge tracks from source into target. Preserves target's id+title, adds unique videoIds.
@@ -651,7 +708,11 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             }
         }
         if changed {
-            savePlaylistsToDisk()
+            // Runs from WatchPlayer's .readyToPlay on effectively every track start for
+            // legacy downloads, so neither the disk write nor a directory scan belongs
+            // here: mark dirty and let the debounce persist it, and re-derive the UI list
+            // from the cached id set (a duration edit can't change what's on disk).
+            scheduleLibraryFlush()
             syncCachedAvailablePlaylistsFromMemory()
         }
     }
@@ -680,16 +741,26 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         refreshAvailable()
     }
 
+    /// Files that looked orphaned on the *previous* cleanup pass. A file must be orphaned
+    /// twice in a row before it is deleted, so one index push arriving while metadata is
+    /// briefly out of sync can never destroy audio that a later sync would have claimed.
+    private var orphanCandidates: Set<String> = []
+
     func cleanupOrphanedFiles() {
         // Don't cleanup while actively receiving files — race condition
         guard receivingCount == 0 else {
             print("[Receiver] Skipping cleanup — \(receivingCount) files being received")
             return
         }
+        // Reuse the cached id set: callers reach here right after a refreshAvailable(),
+        // so a second full directory enumeration here is pure duplicated work on the
+        // main actor during the heaviest moment of a sync.
         let allTrackIds = Set(playlists.flatMap { $0.tracks.map(\.videoId) })
-        let onDisk = availableTrackIds() ?? []
-        let orphans = onDisk.subtracting(allTrackIds)
-        guard !orphans.isEmpty else { return }
+        let orphans = cachedOrFreshTrackIds().subtracting(allTrackIds)
+        guard !orphans.isEmpty else {
+            orphanCandidates = []
+            return
+        }
         // Delay cleanup to give pending transfers time to register
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -697,14 +768,21 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             let currentTrackIds = Set(self.playlists.flatMap { $0.tracks.map(\.videoId) })
             let stillOrphaned = orphans.subtracting(currentTrackIds)
             guard self.receivingCount == 0 else { return }
-            for id in stillOrphaned {
+
+            // Only delete what was already orphaned on the previous pass.
+            let confirmed = stillOrphaned.intersection(self.orphanCandidates)
+            self.orphanCandidates = stillOrphaned.subtracting(confirmed)
+
+            for id in confirmed {
                 let audioFile = Self.audioDirectory.appendingPathComponent("\(id).m4a")
                 let thumbFile = Self.thumbnailDirectory.appendingPathComponent("\(id).jpg")
                 try? self.fm.removeItem(at: audioFile)
                 try? self.fm.removeItem(at: thumbFile)
             }
-            if !stillOrphaned.isEmpty {
-                print("[Receiver] Cleaned up \(stillOrphaned.count) orphaned files")
+            if !confirmed.isEmpty {
+                self.invalidateAvailabilityCache()
+                self.syncCachedAvailablePlaylistsFromMemory()
+                print("[Receiver] Cleaned up \(confirmed.count) orphaned files")
             }
         }
     }
@@ -760,9 +838,7 @@ extension WatchFileReceiver: WCSessionDelegate {
             defer {
                 self.receivingCount = max(0, self.receivingCount - 1)
                 if self.receivingCount == 0 {
-                    self.savePlaylistsToDisk()
-                    self._cachedTrackIds = nil
-                    self.refreshAvailable()
+                    self.flushLibraryNow()
 
                     // Reset sync progress when all transfers done
                     Task { @MainActor in
@@ -899,13 +975,23 @@ extension WatchFileReceiver: WCSessionDelegate {
         let typeStr = applicationContext[WatchMessageKey.type.rawValue] as? String
         let b64 = applicationContext[WatchMessageKey.payload.rawValue] as? String
         let videoId = applicationContext["videoId"] as? String
+        let isZlib = (applicationContext["zlib"] as? Bool) == true
 
         Task { @MainActor in
             guard let typeStr, let type = WatchMessageType(rawValue: typeStr) else { return }
 
             switch type {
             case .playlistIndex:
-                guard let b64, let data = Data(base64Encoded: b64) else { return }
+                guard let b64, let raw = Data(base64Encoded: b64) else { return }
+                // The phone compresses this payload (see pushAllPlaylistIndexes). Fall back
+                // to the raw bytes if the flag is absent or inflation fails, so an older
+                // phone build's uncompressed index still works.
+                let data: Data
+                if isZlib, let inflated = (try? (raw as NSData).decompressed(using: .zlib)) as Data? {
+                    data = inflated
+                } else {
+                    data = raw
+                }
                 // Try batch format (array of playlists) first, fall back to single
                 if let batchPlaylists = try? JSONDecoder().decode([Playlist].self, from: data) {
                     // Batch upsert: mutate array, save disk ONCE at end (not per playlist).

@@ -584,12 +584,33 @@ final class WatchSyncManager: NSObject, ObservableObject {
         guard let session, session.activationState == .activated else { return }
         // Send ALL playlist indexes in one applicationContext (single slot — must batch)
         guard let data = try? JSONEncoder().encode(syncedPlaylists) else { return }
-        let context: [String: Any] = [
+
+        // The application context is capped at ~262KB and base64 inflates by a third, so
+        // a raw index crosses the limit somewhere around 400 tracks — at which point the
+        // push throws and the Watch silently never receives the index again. This JSON is
+        // highly repetitive (same keys, same thumbnail host) and zlib takes it down ~26x,
+        // which also removes a multi-hundred-KB decode spike on the memory-tight Watch.
+        let compressed = (try? (data as NSData).compressed(using: .zlib)) as Data?
+        let payload = compressed.map { $0.count < data.count ? $0 : data } ?? data
+        let didCompress = payload.count < data.count
+
+        var context: [String: Any] = [
             WatchMessageKey.type.rawValue: WatchMessageType.playlistIndex.rawValue,
-            WatchMessageKey.payload.rawValue: data.base64EncodedString()
+            WatchMessageKey.payload.rawValue: payload.base64EncodedString()
         ]
-        try? session.updateApplicationContext(context)
+        if didCompress { context[Self.zlibFlagKey] = true }
+
+        do {
+            try session.updateApplicationContext(context)
+        } catch {
+            // Never swallow this: a failed push means the Watch's library silently stops
+            // tracking the phone's.
+            print("[Sync] ✗ playlist index push failed (\(payload.count)B, \(syncedPlaylists.count) playlists): \(error.localizedDescription)")
+        }
     }
+
+    /// Marks the application-context payload as zlib-compressed.
+    static let zlibFlagKey = "zlib"
 
     /// Handle authoritative confirmation from Watch about a track (WiFi OR Bluetooth path).
     /// This is the SINGLE source of truth for syncedTrackIds — Watch tells us what it has.

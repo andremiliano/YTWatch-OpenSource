@@ -279,7 +279,7 @@ struct SettingsView: View {
 
                         // About
                         SettingsSection(title: "About") {
-                            SettingsRow(icon: "waveform", iconColor: Color.ytRed, label: "YTWatch", value: "1.0.0")
+                            SettingsRow(icon: "waveform", iconColor: Color.ytRed, label: "iPhone App", value: AppVersion.display)
                             Divider().background(Color.appBorder).padding(.horizontal, 14)
                             SettingsRow(icon: "network", iconColor: .teal, label: "Audio Source", value: "YouTube Direct")
                         }

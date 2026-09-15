@@ -99,6 +99,20 @@ struct StorageManagementView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                 }
+
+                // Build identity — lets you confirm the Watch app matches the iPhone app
+                // (iPhone: Settings → About → Watch App).
+                VStack(spacing: 2) {
+                    Text("Watch App")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color(white: 0.35))
+                    Text(AppVersion.display)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color(white: 0.5))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
             }
             .padding(.horizontal, 8)
         }

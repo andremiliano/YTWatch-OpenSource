@@ -458,6 +458,10 @@ final class WatchPlayer: ObservableObject {
 
         let track = playlist.tracks[index]
         guard let url = WatchFileReceiver.shared.audioURL(for: track.videoId) else {
+            // The queue only offers tracks the availability cache says are on disk, so
+            // reaching here means that cache is stale. Drop it, or every subsequent
+            // advance keeps picking missing tracks until the skip guard stops playback.
+            WatchFileReceiver.shared.invalidateAvailabilityCache()
             handleUnplayable(track: track, reason: "not downloaded")
             return
         }
@@ -591,15 +595,18 @@ final class WatchPlayer: ObservableObject {
                     self.player?.play()
                     self.player?.volume = self.currentVolume
                     self.isPlaying = true
-                    self.updateNowPlaying()
-                    self.saveLastPlayed()
-                    // Heal old-version downloads (durationSeconds=0) from the asset's duration.
+                    // Heal old-version downloads (durationSeconds=0) from the asset's
+                    // duration BEFORE publishing Now Playing, otherwise the lock screen
+                    // gets a 0-duration entry with a dead scrubber for those tracks.
+                    // Persisting is deferred, so this stays cheap.
                     if self.knownTrackDuration <= 0, !dur.isNaN, dur > 0 {
                         self.duration = dur
                         if let vid = self.currentTrack?.videoId {
                             WatchFileReceiver.shared.updateTrackDuration(videoId: vid, duration: Int(dur.rounded()))
                         }
                     }
+                    self.updateNowPlaying()
+                    self.saveLastPlayed()
                     let artworkGen = capturedGen
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 1_500_000_000)

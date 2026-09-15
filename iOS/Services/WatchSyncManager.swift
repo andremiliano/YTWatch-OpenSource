@@ -64,6 +64,16 @@ final class WatchSyncManager: NSObject, ObservableObject {
         session?.activationState == .activated && session?.isPaired == true
     }
 
+    /// Downloads on this iPhone that are neither on the Watch nor on their way there —
+    /// mostly songs downloaded outside a playlist, which are never auto-sent.
+    var unsyncedDownloadCount: Int {
+        let queued = Set(pendingSyncQueue.map(\.videoId))
+        return AudioDownloader.shared.downloadedTracks.keys.reduce(0) { count, id in
+            syncedTrackIds.contains(id) || transferringTrackIds.contains(id) || queued.contains(id)
+                ? count : count + 1
+        }
+    }
+
     func queueTrackForSync(_ track: Track, fileURL: URL, playlistId: String, playlistTitle: String) {
         guard !syncedTrackIds.contains(track.videoId) else { return }
         guard !transferringTrackIds.contains(track.videoId) else { return }
@@ -449,11 +459,6 @@ final class WatchSyncManager: NSObject, ObservableObject {
         wifiTimeoutTasks.removeValue(forKey: videoId)
     }
 
-    private func cancelAllWifiTimeouts() {
-        for (_, task) in wifiTimeoutTasks { task.cancel() }
-        wifiTimeoutTasks.removeAll()
-    }
-
     /// Slow path: transfer files over Bluetooth via WCSession.transferFile
     private func syncViaTransferFile(_ items: [(track: Track, url: URL, playlistId: String, playlistTitle: String, index: Int)]) {
         Task.detached {
@@ -706,7 +711,7 @@ final class WatchSyncManager: NSObject, ObservableObject {
             syncedTrackIds = Set(ids)
         }
         if let data = UserDefaults.standard.data(forKey: "syncedPlaylists"),
-           let playlists = try? JSONDecoder().decode([Playlist].self, from: data) {
+           let playlists = Playlist.decodeLossy(from: data) {
             syncedPlaylists = playlists
         }
     }
@@ -742,15 +747,18 @@ extension WatchSyncManager: WCSessionDelegate {
         let reachable = session.isReachable
         Task { @MainActor in
             self.isWatchReachable = reachable
+            // When the Watch becomes unreachable, deliberately leave the WiFi timeouts
+            // running: they are the only thing that releases a WiFi-path track from
+            // `transferringTrackIds`. Cancelling them (as this used to) left those tracks
+            // "sending" forever, pinning every transfer slot so the queue never drained
+            // ("5 sending · N queued" frozen while Paired). Expiring, each falls back to
+            // Bluetooth, which works while unreachable; a late Watch success still wins.
             if reachable {
                 // Fresh connection — clear WiFi-failed so tracks can try WiFi again
                 self.wifiFailedVideoIds.removeAll()
                 // NO auto-verify — user must explicitly tap Verify & Re-sync.
                 // Auto-firing on every reachability caused crash loops on bad state.
                 self.drainPendingQueue()
-            } else {
-                // Watch went unreachable — cancel pending WiFi timeouts
-                self.cancelAllWifiTimeouts()
             }
         }
     }
@@ -840,10 +848,62 @@ extension WatchSyncManager: WCSessionDelegate {
                 if let videoId { self.handleDirectDownloadResult(videoId: videoId, success: success ?? false) }
             case .requestRedownload:
                 if let videoIds { self.handleRedownloadRequest(videoIds: videoIds) }
+            case .requestTrackMetadata:
+                if let videoIds { self.handleTrackMetadataRequest(videoIds: videoIds) }
             default:
                 break
             }
         }
+    }
+
+    /// The Watch has audio files it can only label by raw videoId (its saved metadata was
+    /// lost). Answer with the real title/artist and the playlist each belongs to, so the
+    /// Watch can file them properly instead of showing raw ids as titles.
+    private func handleTrackMetadataRequest(videoIds: [String]) {
+        guard let session, session.activationState == .activated else { return }
+        let wanted = Set(videoIds)
+
+        // Prefer the playlist context the Watch was actually told about, then the phone's
+        // library, then plain download metadata filed under "Downloads".
+        var found: [String: TrackTransferMetadata] = [:]
+        func claim(from playlists: [Playlist]) {
+            for playlist in playlists {
+                for (index, track) in playlist.tracks.enumerated()
+                where wanted.contains(track.videoId) && found[track.videoId] == nil {
+                    found[track.videoId] = TrackTransferMetadata(
+                        track: track, playlistId: playlist.id,
+                        playlistTitle: playlist.title, indexInPlaylist: index
+                    )
+                }
+            }
+        }
+        claim(from: syncedPlaylists)
+        claim(from: LibraryStore.shared.playlists)
+        let metadata = AudioDownloader.shared.trackMetadata
+        for videoId in wanted where found[videoId] == nil {
+            guard let m = metadata[videoId] else { continue }
+            found[videoId] = TrackTransferMetadata(
+                track: Track(id: videoId, videoId: videoId, title: m.title, artist: m.artist,
+                             album: m.album, durationSeconds: m.durationSeconds, thumbnailURL: m.thumbnailURL),
+                playlistId: "library", playlistTitle: "Downloads", indexInPlaylist: -1
+            )
+        }
+
+        guard !found.isEmpty, let json = try? JSONEncoder().encode(Array(found.values)) else {
+            print("[Sync] Watch asked about \(wanted.count) untitled tracks; none known")
+            return
+        }
+        // Queued delivery that survives the Watch app not running; compressed for the same
+        // size-limit reason as the playlist index.
+        let compressed = (try? (json as NSData).compressed(using: .zlib)) as Data?
+        let payload = compressed.map { $0.count < json.count ? $0 : json } ?? json
+        var info: [String: Any] = [
+            WatchMessageKey.type.rawValue: WatchMessageType.trackMetadataBatch.rawValue,
+            WatchMessageKey.payload.rawValue: payload.base64EncodedString()
+        ]
+        if payload.count < json.count { info[Self.zlibFlagKey] = true }
+        session.transferUserInfo(info)
+        print("[Sync] Sent metadata for \(found.count)/\(wanted.count) untitled Watch tracks")
     }
 
     /// Watch reported these tracks as missing/corrupt — clear their synced state and re-send.

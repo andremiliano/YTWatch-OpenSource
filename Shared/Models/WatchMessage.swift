@@ -17,6 +17,8 @@ enum WatchMessageType: String, Codable {
     case directDownload  // iPhone → Watch: stream URL for Watch to download directly via WiFi
     case downloadResult  // Watch → iPhone: result of a direct download attempt
     case requestRedownload // Watch → iPhone: these videoIds are missing/corrupt, please re-send
+    case requestTrackMetadata // Watch → iPhone: files on disk with no known title/playlist
+    case trackMetadataBatch   // iPhone → Watch: metadata answering requestTrackMetadata
 }
 
 /// Sent from iPhone to Watch — Watch downloads audio directly over WiFi

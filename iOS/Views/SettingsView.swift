@@ -6,6 +6,7 @@ struct SettingsView: View {
     @ObservedObject private var sync = WatchSyncManager.shared
     @State private var showLogoutConfirm = false
     @State private var showClearAllConfirm = false
+    @State private var showSendRemainingConfirm = false
     @State private var appeared = false
 
     @State private var estimatedWatchStorage: String = "—"
@@ -74,9 +75,44 @@ struct SettingsView: View {
                             SettingsRow(
                                 icon: "music.note",
                                 iconColor: Color.appDim,
-                                label: "Synced Tracks",
+                                label: "On Watch",
                                 value: "\(sync.syncedTrackIds.count)"
                             )
+
+                            // Downloads that aren't on the Watch and aren't on their way —
+                            // mostly songs downloaded outside a playlist, which are never
+                            // auto-sent. Without this row the counts looked contradictory.
+                            let onlyOnPhone = sync.unsyncedDownloadCount
+                            if onlyOnPhone > 0 {
+                                Divider().background(Color.appBorder).padding(.horizontal, 14)
+
+                                Button {
+                                    showSendRemainingConfirm = true
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "iphone")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(Color.appDim)
+                                            .frame(width: 28, height: 28)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text("Only on iPhone")
+                                                .font(.system(size: 15))
+                                                .foregroundStyle(.white)
+                                            Text("Tap to send to Watch")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(Color.appFaint)
+                                        }
+                                        Spacer()
+                                        Text("\(onlyOnPhone)")
+                                            .font(.system(size: 15))
+                                            .foregroundStyle(Color.appFaint)
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 13)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!sync.isAvailable)
+                            }
 
                             Divider().background(Color.appBorder).padding(.horizontal, 14)
 
@@ -114,7 +150,10 @@ struct SettingsView: View {
                                             .foregroundStyle(.white)
                                         if let r = sync.lastVerifyResult {
                                             if r.missingOnWatch == 0 {
-                                                Text("All good — \(r.actuallyOnWatch) tracks on Watch")
+                                                // A snapshot, not live state — say when it was
+                                                // taken so it can't read as contradicting an
+                                                // active sync below it.
+                                                Text("\(r.actuallyOnWatch) on Watch · checked \(r.date, style: .relative) ago")
                                                     .font(.system(size: 11))
                                                     .foregroundStyle(Color.appFaint)
                                             } else {
@@ -152,10 +191,18 @@ struct SettingsView: View {
                                             .font(.system(size: 15))
                                             .foregroundStyle(.white)
                                         let transferring = sync.transferringTrackIds.count
-                                        let pending = sync.pendingSyncCount
-                                        Text("\(transferring) sending · \(pending) queued")
+                                        // Tracks stay in the pending queue until the Watch
+                                        // confirms them, so the queue already includes the
+                                        // ones sending — don't count them twice.
+                                        let waiting = max(0, sync.pendingSyncCount - transferring)
+                                        Text("\(transferring) sending · \(waiting) waiting")
                                             .font(.system(size: 11))
                                             .foregroundStyle(Color.appFaint)
+                                        if !sync.isWatchReachable {
+                                            Text("Open YTWatch on your Watch to speed this up")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(.orange)
+                                        }
                                     }
 
                                     Spacer()
@@ -300,6 +347,12 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbarBackground(Color.appBg, for: .navigationBar)
             .toolbarColorScheme(.dark, for: .navigationBar)
+            .alert("Send to Watch?", isPresented: $showSendRemainingConfirm) {
+                Button("Send \(sync.unsyncedDownloadCount) tracks") { sync.syncUnsyncedDownloads() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("These downloads aren't on your Watch yet. They'll be added to a \"Downloads\" playlist there.")
+            }
             .alert("Sign Out?", isPresented: $showLogoutConfirm) {
                 Button("Sign Out", role: .destructive) { client.logout() }
                 Button("Cancel", role: .cancel) {}

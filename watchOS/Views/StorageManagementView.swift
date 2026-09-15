@@ -101,7 +101,7 @@ struct StorageManagementView: View {
                 }
 
                 // Build identity — lets you confirm the Watch app matches the iPhone app
-                // (iPhone: Settings → About → Watch App).
+                // (iPhone: Settings → About → iPhone App).
                 VStack(spacing: 2) {
                     Text("Watch App")
                         .font(.system(size: 9, weight: .semibold))

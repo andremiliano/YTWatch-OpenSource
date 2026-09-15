@@ -50,7 +50,11 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         // Merge any pre-existing duplicate playlists by title (one-time cleanup on launch)
         let beforeCount = playlists.count
         consolidateDuplicateTitles()
-        if playlists.count != beforeCount {
+        // Clean up raw-id duplicates left in Unsorted by earlier builds for tracks that
+        // already have a proper entry.
+        let pruned = LibraryReconciler.pruneUnsorted(playlists)
+        if let pruned { playlists = pruned }
+        if playlists.count != beforeCount || pruned != nil {
             savePlaylistsToDisk()
         }
         refreshAvailable()
@@ -221,6 +225,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         upsertPlaylistDeferred(unsorted)
         flushLibraryNow() // recovery is rare and must survive an immediate suspend
         print("[Receiver] Adopted \(orphaned.count) orphaned audio files into Unsorted")
+        requestMissingMetadataIfNeeded()
     }
 
     func availableTrackIds() -> Set<String>? {
@@ -388,7 +393,20 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 try? fm.removeItem(at: destURL)
                 try fm.moveItem(at: tempURL, to: destURL)
 
-                // Download thumbnail (also streamed to disk)
+                // Register the track NOW, with no suspension point between the file landing
+                // and its metadata. It used to happen after the thumbnail await below, so a
+                // suspend/kill during that fetch left an audio file no playlist knew about —
+                // which then surfaced as a raw-videoId entry in "Unsorted".
+                if AudioFileGate.isValid(sizeBytes: size) {
+                    markFileAvailable(videoId: videoId)
+                } else {
+                    // Too small to be real audio: don't let the cache advertise it.
+                    invalidateAvailabilityCache()
+                }
+                upsertTrackIntoPlaylistDeferred(payload)
+                scheduleLibraryFlush()
+
+                // Download thumbnail (also streamed to disk) — cosmetic, safe to lose.
                 if let thumbURLStr = payload.thumbnailDownloadURL,
                    let thumbURL = URL(string: thumbURLStr) {
                     if let (thumbTemp, thumbResp) = try? await URLSession.shared.download(from: thumbURL),
@@ -399,8 +417,6 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                     }
                 }
 
-                upsertTrackIntoPlaylistDeferred(payload)
-                scheduleLibraryFlush()
                 syncedTrackCount += 1
 
                 print("[Receiver] WiFi download ✓ \(payload.track.title) (\(syncedTrackCount)/\(syncTotalCount))")
@@ -460,25 +476,71 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     /// already fixed once for the playlistIndex path via upsertPlaylistsBatch (see
     /// didReceiveApplicationContext). Callers must pair this with scheduleLibraryFlush().
     private func upsertTrackIntoPlaylistDeferred(_ payload: DirectDownloadPayload) {
-        if var playlist = playlists.first(where: { $0.id == payload.playlistId }) {
-            if !playlist.tracks.contains(where: { $0.videoId == payload.track.videoId }) {
-                let idx = payload.indexInPlaylist
-                if idx >= 0 && idx <= playlist.tracks.count {
-                    playlist.tracks.insert(payload.track, at: min(idx, playlist.tracks.count))
-                } else {
-                    playlist.tracks.append(payload.track)
+        upsertTrackDeferred(
+            payload.track, playlistId: payload.playlistId,
+            playlistTitle: payload.playlistTitle, indexInPlaylist: payload.indexInPlaylist
+        )
+    }
+
+    /// In-memory only. If the playlist already lists this videoId under a placeholder
+    /// (raw-id title from an earlier recovery), the placeholder is replaced with the real
+    /// metadata rather than left in place.
+    private func upsertTrackDeferred(_ track: Track, playlistId: String, playlistTitle: String, indexInPlaylist idx: Int) {
+        if var playlist = playlists.first(where: { $0.id == playlistId }) {
+            if let existing = playlist.tracks.firstIndex(where: { $0.videoId == track.videoId }) {
+                if playlist.tracks[existing].title == track.videoId, track.title != track.videoId {
+                    playlist.tracks[existing] = track
                 }
+            } else if idx >= 0 && idx <= playlist.tracks.count {
+                playlist.tracks.insert(track, at: min(idx, playlist.tracks.count))
+            } else {
+                playlist.tracks.append(track)
             }
             upsertPlaylistDeferred(playlist)
         } else {
-            let newPlaylist = Playlist(
-                id: payload.playlistId,
-                title: payload.playlistTitle,
-                thumbnailURL: nil,
-                tracks: [payload.track]
-            )
-            upsertPlaylistDeferred(newPlaylist)
+            upsertPlaylistDeferred(Playlist(
+                id: playlistId, title: playlistTitle, thumbnailURL: nil, tracks: [track]
+            ))
         }
+    }
+
+    // MARK: - Metadata recovery
+
+    /// videoIds we've already asked the phone about this launch — avoids re-asking on
+    /// every root-view appearance while the answer is in flight.
+    private var metadataRequested: Set<String> = []
+
+    /// Ask the phone for real titles/playlists of tracks that exist only as raw-id
+    /// placeholders in Unsorted. Goes over transferUserInfo, which is queued and delivered
+    /// even if the phone app isn't running.
+    func requestMissingMetadataIfNeeded() {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return }
+        let wanted = LibraryReconciler.placeholderIds(in: playlists).filter { !metadataRequested.contains($0) }
+        guard !wanted.isEmpty else { return }
+        let batch = Array(wanted.prefix(500))
+        metadataRequested.formUnion(batch)
+        WCSession.default.transferUserInfo([
+            WatchMessageKey.type.rawValue: WatchMessageType.requestTrackMetadata.rawValue,
+            "videoIds": batch
+        ])
+        print("[Receiver] Requested metadata for \(batch.count) untitled tracks")
+    }
+
+    /// Apply the phone's answer: file each recovered track under its real playlist. The
+    /// flush then prunes the raw-id placeholders out of Unsorted.
+    private func applyRecoveredMetadata(_ entries: [TrackTransferMetadata]) {
+        var applied = 0
+        for entry in entries where audioURL(for: entry.track.videoId) != nil {
+            upsertTrackDeferred(
+                entry.track, playlistId: entry.playlistId,
+                playlistTitle: entry.playlistTitle, indexInPlaylist: entry.indexInPlaylist
+            )
+            applied += 1
+        }
+        guard applied > 0 else { return }
+        consolidateDuplicateTitles()
+        flushLibraryNow()
+        print("[Receiver] Recovered metadata for \(applied) tracks")
     }
 
     /// True when `playlists` holds changes that haven't been written to disk yet.
@@ -526,9 +588,30 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         libraryFlushDeadline = nil
         guard libraryDirty else { return }
         libraryDirty = false
+
+        // A track that now has a real playlist entry must not also linger in Unsorted
+        // under its raw videoId.
+        if let pruned = LibraryReconciler.pruneUnsorted(playlists) {
+            playlists = pruned
+        }
         savePlaylistsToDisk()
-        _cachedTrackIds = nil
-        refreshAvailable()
+
+        // Every path that adds a file updates the cache incrementally (markFileAvailable)
+        // and every path that removes one invalidates it, so a full directory enumeration
+        // is only needed when the cache is gone. Rescanning here unconditionally meant a
+        // full stat of the whole library after every single received track.
+        if let ids = _cachedTrackIds {
+            rebuildCachedAvailablePlaylists(using: ids)
+        } else {
+            refreshAvailable()
+        }
+    }
+
+    /// Record that a complete audio file just landed, so availability updates without a
+    /// directory scan. Callers must only pass files that already passed AudioFileGate.
+    /// No-op when the cache is absent — the next flush does a full scan anyway.
+    private func markFileAvailable(videoId: String) {
+        _cachedTrackIds?.insert(videoId)
     }
 
     /// Drop the cached availability set so the next query re-reads the directory. Used
@@ -559,14 +642,26 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
     private func loadPlaylistsFromDisk() {
         let url = cacheURL()
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([Playlist].self, from: data) else { return }
-        playlists = decoded
+        guard let data = try? Data(contentsOf: url) else { return }
+        if let decoded = Playlist.decodeLossy(from: data) {
+            playlists = decoded
+        } else {
+            // Unreadable as a whole. Keep the bytes aside before the next save overwrites
+            // them; the tracks themselves are recovered by adoption + a metadata request
+            // to the phone (see requestMissingMetadataIfNeeded).
+            let backup = url.deletingPathExtension().appendingPathExtension("corrupt.json")
+            try? fm.removeItem(at: backup)
+            try? fm.copyItem(at: url, to: backup)
+            print("[Receiver] playlists cache unreadable (\(data.count)B) — saved to \(backup.lastPathComponent)")
+        }
     }
 
     private func savePlaylistsToDisk() {
         guard let data = try? JSONEncoder().encode(playlists) else { return }
-        try? data.write(to: cacheURL())
+        // Atomic: write to a temp file and rename. A plain write that's interrupted by the
+        // app being killed (this is the app that was crashing) leaves truncated JSON, which
+        // fails to decode on next launch and orphans every track in the library.
+        try? data.write(to: cacheURL(), options: .atomic)
     }
 
     private func cacheURL() -> URL {
@@ -792,7 +887,12 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
 extension WatchFileReceiver: WCSessionDelegate {
 
-    nonisolated func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {}
+    nonisolated func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {
+        guard state == .activated else { return }
+        // init() runs before activation completes, so any recovery request made there is
+        // dropped; this is the first moment it can actually be sent.
+        Task { @MainActor in self.requestMissingMetadataIfNeeded() }
+    }
 
     // Receive audio or thumbnail file
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
@@ -859,7 +959,14 @@ extension WatchFileReceiver: WCSessionDelegate {
             // Confirm to phone whether file actually wrote (closes the BT-sync drift bug)
             self.sendDownloadResult(videoId: transfer.track.videoId, success: wroteSuccessfully)
 
-            guard wroteSuccessfully else { return }
+            guard wroteSuccessfully else {
+                // The old copy was removed before the failed write — same stale-cache
+                // hazard as a failed WiFi download.
+                self.invalidateAvailabilityCache()
+                return
+            }
+            // wroteSuccessfully already means the file passed AudioFileGate.
+            self.markFileAvailable(videoId: transfer.track.videoId)
 
             // Update sync progress
             self.syncingPlaylistName = transfer.playlistTitle
@@ -948,7 +1055,8 @@ extension WatchFileReceiver: WCSessionDelegate {
         let typeStr = msg[WatchMessageKey.type.rawValue] as? String
         let videoId = msg["videoId"] as? String
         let payloadB64 = msg[WatchMessageKey.payload.rawValue] as? String
-        
+        let isZlib = (msg["zlib"] as? Bool) == true
+
         Task { @MainActor in
             guard let typeStr, let type = WatchMessageType(rawValue: typeStr) else { 
                 replyHandler?([:])
@@ -963,6 +1071,15 @@ extension WatchFileReceiver: WCSessionDelegate {
                    let data = Data(base64Encoded: b64),
                    let payload = try? JSONDecoder().decode(DirectDownloadPayload.self, from: data) {
                     self.handleDirectDownload(payload)
+                }
+            case .trackMetadataBatch:
+                if let b64 = payloadB64, let raw = Data(base64Encoded: b64) {
+                    let data = isZlib
+                        ? ((try? (raw as NSData).decompressed(using: .zlib)) as Data? ?? raw)
+                        : raw
+                    if let entries = try? JSONDecoder().decode([Lossy<TrackTransferMetadata>].self, from: data) {
+                        self.applyRecoveredMetadata(entries.compactMap(\.value))
+                    }
                 }
             default:
                 break
@@ -993,7 +1110,7 @@ extension WatchFileReceiver: WCSessionDelegate {
                     data = raw
                 }
                 // Try batch format (array of playlists) first, fall back to single
-                if let batchPlaylists = try? JSONDecoder().decode([Playlist].self, from: data) {
+                if let batchPlaylists = Playlist.decodeLossy(from: data) {
                     // Batch upsert: mutate array, save disk ONCE at end (not per playlist).
                     // 30 playlists used to trigger 30 disk writes + 30 directory scans → Watch crash.
                     self.upsertPlaylistsBatch(batchPlaylists)

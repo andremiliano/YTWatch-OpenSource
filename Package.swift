@@ -9,7 +9,11 @@ let package = Package(
         .target(
             name: "PlaybackCore",
             path: "Shared",
-            sources: ["PlaybackQueue.swift", "StallDetector.swift", "AudioFileGate.swift"]
+            sources: [
+                "PlaybackQueue.swift", "StallDetector.swift", "AudioFileGate.swift",
+                "PlaybackWatchdog.swift", "LibraryReconciler.swift",
+                "Models/Track.swift", "Models/Playlist.swift",
+            ]
         ),
         .testTarget(
             name: "PlaybackCoreTests",

@@ -134,7 +134,8 @@ final class LibraryStore: ObservableObject {
     private func saveToDisk() {
         let cache = LibraryCache(playlists: playlists, librarySongs: librarySongs)
         guard let data = try? JSONEncoder().encode(cache) else { return }
-        try? data.write(to: cacheURL)
+        // Atomic so a kill mid-write can't leave truncated JSON that loses the library.
+        try? data.write(to: cacheURL, options: .atomic)
     }
 
     private func loadFromDisk() {

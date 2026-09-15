@@ -30,17 +30,20 @@ struct Track: Codable, Identifiable, Hashable, Sendable {
         self.albumId = albumId
     }
 
+    /// Only `videoId` is truly required. Everything else degrades to a usable default,
+    /// because a single strict failure here used to fail the decode of the *entire*
+    /// saved library — which is how whole libraries turned into raw-videoId entries.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
         videoId = try c.decode(String.self, forKey: .videoId)
-        title = try c.decode(String.self, forKey: .title)
-        artist = try c.decode(String.self, forKey: .artist)
-        album = try c.decodeIfPresent(String.self, forKey: .album)
-        durationSeconds = try c.decode(Int.self, forKey: .durationSeconds)
-        thumbnailURL = try c.decodeIfPresent(String.self, forKey: .thumbnailURL)
-        artistId = try c.decodeIfPresent(String.self, forKey: .artistId)
-        albumId = try c.decodeIfPresent(String.self, forKey: .albumId)
+        id = (try? c.decodeIfPresent(String.self, forKey: .id)) ?? videoId
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? videoId
+        artist = (try? c.decodeIfPresent(String.self, forKey: .artist)) ?? ""
+        album = try? c.decodeIfPresent(String.self, forKey: .album)
+        durationSeconds = (try? c.decodeIfPresent(Int.self, forKey: .durationSeconds)) ?? 0
+        thumbnailURL = try? c.decodeIfPresent(String.self, forKey: .thumbnailURL)
+        artistId = try? c.decodeIfPresent(String.self, forKey: .artistId)
+        albumId = try? c.decodeIfPresent(String.self, forKey: .albumId)
     }
 
     var durationFormatted: String {

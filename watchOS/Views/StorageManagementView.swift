@@ -109,6 +109,19 @@ struct StorageManagementView: View {
                     Text(AppVersion.display)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color(white: 0.5))
+
+                    // What the app was doing when it last died. There are no readable
+                    // crash logs for this app, so this is the one concrete clue.
+                    if let lastCrash = CrashBreadcrumb.lastUnclean {
+                        Text("Last unexpected stop")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color(white: 0.35))
+                            .padding(.top, 8)
+                        Text(lastCrash)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, 10)

@@ -5,8 +5,12 @@ struct YTWatchWatchApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        // Before anything else: if a marker survived, the previous run died mid-activity.
+        CrashBreadcrumb.consumePrevious()
+        CrashBreadcrumb.mark(.launching)
         _ = WatchFileReceiver.shared  // activate WCSession
         WatchPlayer.shared.configureAudioSession()
+        CrashBreadcrumb.mark(.idle)
     }
 
     var body: some Scene {
@@ -24,6 +28,9 @@ struct YTWatchWatchApp: App {
                 // so without this a sync that finishes just before backgrounding leaves
                 // tracks on disk that no playlist knows about.
                 WatchFileReceiver.shared.flushLibraryNow()
+                // Being killed while suspended and idle is routine, not a crash — only
+                // keep the marker if audio is still running.
+                if !WatchPlayer.shared.isPlaying { CrashBreadcrumb.clearForCleanExit() }
                 // Free image memory while the screen is off (e.g. during a run) —
                 // keeps the app well under the Watch's memory ceiling so long
                 // playback sessions don't get jetsammed.

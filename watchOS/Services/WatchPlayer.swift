@@ -280,8 +280,8 @@ final class WatchPlayer: ObservableObject {
     func play() {
         routeLossPauseDate = nil
         playbackWatchdog.userTookControl()
-        // The player keeps a finished item parked at its end (actionAtItemEnd = .none), so
-        // "play" on it would be silent — move on to the next track instead.
+        // A finished item is still loaded, parked at its end, so "play" on it would be
+        // silent — move on to the next track instead.
         if player?.currentItem != nil, finishedGeneration == playbackGeneration {
             advanceQueue(forward: true)
             return
@@ -454,6 +454,7 @@ final class WatchPlayer: ObservableObject {
     }
 
     private func advanceQueue(forward: Bool) {
+        CrashBreadcrumb.mark(.advancingQueue)
         guard let playlist = currentPlaylist else { return }
         let avail = availableIndices(in: playlist)
         let result = queue.advance(
@@ -522,6 +523,7 @@ final class WatchPlayer: ObservableObject {
         let gen = playbackGeneration
         playbackWatchdog.trackStarted()
 
+        CrashBreadcrumb.mark(.startingTrack(track.title))
         currentIndex = index
         currentTrack = track
         error = nil
@@ -599,12 +601,13 @@ final class WatchPlayer: ObservableObject {
         if let p = player { return p }
         let p = AVPlayer()
         p.automaticallyWaitsToMinimizeStalling = false
-        // Keep the rate at 1 when an item ends instead of pausing. The end notification
-        // still fires and we swap in the next item, but the player is never observed as
-        // "stopped" in between — the moment watchOS uses to suspend background audio.
-        // If advancing ever fails, the clock freezes at rate 1 and both the stall detector
-        // and the watchdog catch it.
-        p.actionAtItemEnd = .none
+        // Must stay .pause (the default). Build 53 set this to .none, hoping to keep the
+        // rate at 1 across a track handoff so watchOS wouldn't see the audio stop — but
+        // in practice playback then stopped at the end of EVERY track and had to be
+        // skipped by hand, so the end-of-item signal we rely on does not survive it.
+        // The gap is kept short instead: playTrack no longer empties the player, and
+        // beginPlayback swaps the item and calls play() in the same turn.
+        p.actionAtItemEnd = .pause
         player = p
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -729,6 +732,18 @@ final class WatchPlayer: ObservableObject {
                 // Watchdog first: it covers the stopped-player case the stall detector
                 // ignores. If it changed track, this tick's samples are stale.
                 if self.runPlaybackWatchdog(player: player, time: t) { return }
+
+                // Track finished but the end notification never reached us: advance now
+                // instead of leaving playback stopped until the user skips by hand.
+                if EndOfItemDetector.isParkedAtEnd(
+                    time: t,
+                    itemDuration: self.playerItem?.duration.seconds,
+                    rate: player.rate,
+                    intendsToPlay: self.isPlaying
+                ) {
+                    self.handleTrackFinished(generation: self.playbackGeneration)
+                    return
+                }
 
                 guard self.isPlaying, player.rate > 0 else {
                     // System paused/ducked playback (route change, brief throttle, etc) —

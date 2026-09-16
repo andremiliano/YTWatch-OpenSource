@@ -74,6 +74,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
     func validateDownloadsOnLaunch() {
         Task { @MainActor in
+            CrashBreadcrumb.mark(.validatingDownloads)
             let ids = Array(availableTrackIds() ?? [])
             guard !ids.isEmpty else { return }
             var validated = Set(UserDefaults.standard.stringArray(forKey: Self.validatedKey) ?? [])
@@ -538,6 +539,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             applied += 1
         }
         guard applied > 0 else { return }
+        CrashBreadcrumb.mark(.applyingMetadata(applied))
         consolidateDuplicateTitles()
         flushLibraryNow()
         print("[Receiver] Recovered metadata for \(applied) tracks")
@@ -934,6 +936,7 @@ extension WatchFileReceiver: WCSessionDelegate {
         }
 
         Task { @MainActor in
+            CrashBreadcrumb.mark(.receivingSync)
             self.receivingCount += 1
             defer {
                 self.receivingCount = max(0, self.receivingCount - 1)
@@ -1111,6 +1114,7 @@ extension WatchFileReceiver: WCSessionDelegate {
                 }
                 // Try batch format (array of playlists) first, fall back to single
                 if let batchPlaylists = Playlist.decodeLossy(from: data) {
+                    CrashBreadcrumb.mark(.libraryIndex(batchPlaylists.count))
                     // Batch upsert: mutate array, save disk ONCE at end (not per playlist).
                     // 30 playlists used to trigger 30 disk writes + 30 directory scans → Watch crash.
                     self.upsertPlaylistsBatch(batchPlaylists)

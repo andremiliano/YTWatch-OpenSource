@@ -14,6 +14,12 @@ final class WatchSyncManager: NSObject, ObservableObject {
     @Published var pendingSyncCount = 0
     @Published var isVerifying = false
     @Published var lastVerifyResult: VerifyResult?
+    /// When the Watch last sent its event log (see WatchDiagnostics on the Watch side).
+    @Published var watchDiagnosticsReceivedAt: Date? = {
+        guard let attrs = try? FileManager.default.attributesOfItem(
+            atPath: WatchSyncManager.watchDiagnosticsURL.path) else { return nil }
+        return attrs[.modificationDate] as? Date
+    }()
 
     struct VerifyResult {
         let phoneThinksSynced: Int
@@ -765,6 +771,18 @@ extension WatchSyncManager: WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, didReceive file: WCSessionFile) {
         if let typeStr = file.metadata?[WatchMessageKey.type.rawValue] as? String,
+           typeStr == WatchMessageType.diagnostics.rawValue {
+            // The Watch's event log. Copy it out of the Inbox (which WCSession reuses)
+            // into Documents so it can be shared from Settings.
+            let text = (try? String(contentsOf: file.fileURL, encoding: .utf8)) ?? ""
+            let watchVersion = file.metadata?["watchVersion"] as? String
+            try? FileManager.default.removeItem(at: file.fileURL)
+            Task { @MainActor in
+                self.saveWatchDiagnostics(text, watchVersion: watchVersion)
+            }
+            return
+        }
+        if let typeStr = file.metadata?[WatchMessageKey.type.rawValue] as? String,
            typeStr == WatchMessageType.syncInventory.rawValue {
             if let data = try? Data(contentsOf: file.fileURL),
                let ids = try? JSONDecoder().decode([String].self, from: data) {
@@ -854,6 +872,22 @@ extension WatchSyncManager: WCSessionDelegate {
                 break
             }
         }
+    }
+
+    /// Where the most recent Watch diagnostics report was saved, if any.
+    static var watchDiagnosticsURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("watch-diagnostics.txt")
+    }
+
+    private func saveWatchDiagnostics(_ text: String, watchVersion: String?) {
+        var report = "iPhone app version: \(AppVersion.display)\n"
+        if let watchVersion { report += "Watch app reported version: \(watchVersion)\n" }
+        report += "Received: \(Date().formatted(date: .abbreviated, time: .shortened))\n\n"
+        report += text
+        try? report.write(to: Self.watchDiagnosticsURL, atomically: true, encoding: .utf8)
+        watchDiagnosticsReceivedAt = Date()
+        print("[Sync] Received Watch diagnostics (\(text.count) bytes)")
     }
 
     /// The Watch has audio files it can only label by raw videoId (its saved metadata was

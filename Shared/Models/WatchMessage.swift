@@ -19,6 +19,7 @@ enum WatchMessageType: String, Codable {
     case requestRedownload // Watch → iPhone: these videoIds are missing/corrupt, please re-send
     case requestTrackMetadata // Watch → iPhone: files on disk with no known title/playlist
     case trackMetadataBatch   // iPhone → Watch: metadata answering requestTrackMetadata
+    case diagnostics          // Watch → iPhone: event log file for sharing
 }
 
 /// Sent from iPhone to Watch — Watch downloads audio directly over WiFi

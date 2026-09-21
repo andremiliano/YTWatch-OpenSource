@@ -116,6 +116,10 @@ final class WatchPlayer: ObservableObject {
     private var stallDetector = StallDetector()
     /// Catches playback that silently stopped while we still intend to play (see type).
     private var playbackWatchdog = PlaybackWatchdog()
+    /// Catches a track that ended without the end notification arriving.
+    private var endOfItemDetector = EndOfItemDetector()
+    /// Fails the start attempt if audio-session activation never calls back.
+    private var activationTimeout: Task<Void, Never>?
     private var stallTimer: Timer?
     private var failObserver: NSObjectProtocol?
     /// Set when Bluetooth audio disappears mid-playback, so playback can resume on its
@@ -160,6 +164,11 @@ final class WatchPlayer: ObservableObject {
             beginPlayback(url: url, generation: generation)
             return
         }
+        // Activation is asynchronous and can simply never call back (it is entered on every
+        // track start after an interruption, since `.began` clears sessionActivated). While
+        // waiting, the stall timer is stopped and no item is installed, so nothing else is
+        // watching: playback would die silently showing the new track's title. Time it out.
+        startActivationTimeout(generation: generation)
         let session = AVAudioSession.sharedInstance()
         session.activate(options: []) { [weak self] success, activationError in
             Task { @MainActor in
@@ -174,6 +183,8 @@ final class WatchPlayer: ObservableObject {
                         self.activateSessionAndPlay(url: url, generation: generation)
                     } else {
                         self.activationRetryCount = 0
+                        self.cancelActivationTimeout()
+                        WatchDiagnostics.shared.log("audio session activation failed: \(activationError?.localizedDescription ?? "unknown")")
                         self.error = "Audio activation failed: \(activationError?.localizedDescription ?? "unknown")"
                         // playTrack no longer empties the player up front (so track handoffs
                         // stay gapless), so the previous item may still be loaded here. Clear
@@ -188,6 +199,29 @@ final class WatchPlayer: ObservableObject {
                 self.beginPlayback(url: url, generation: generation)
             }
         }
+    }
+
+    /// Longer than the retry ladder (0.5 + 1.0 + 1.5s) so it only fires on a genuine hang.
+    private static let activationTimeoutSeconds: UInt64 = 8
+
+    private func startActivationTimeout(generation: Int) {
+        activationTimeout?.cancel()
+        activationTimeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.activationTimeoutSeconds * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            guard self.playbackGeneration == generation, !self.sessionActivated else { return }
+            WatchDiagnostics.shared.log("audio session activation timed out — skipping track")
+            self.activationRetryCount = 0
+            self.tearDownPlayer()
+            self.isPlaying = false
+            let track = self.currentTrack ?? Track(id: "", videoId: "", title: "?", artist: "", durationSeconds: 0)
+            self.handleUnplayable(track: track, reason: "audio session never activated")
+        }
+    }
+
+    private func cancelActivationTimeout() {
+        activationTimeout?.cancel()
+        activationTimeout = nil
     }
 
     func setVolume(_ vol: Float) {
@@ -309,6 +343,7 @@ final class WatchPlayer: ObservableObject {
         player?.pause()
         isPlaying = false
         updateNowPlaying()
+        WatchBreadcrumb.settled()
     }
 
     func togglePlayPause() {
@@ -463,6 +498,7 @@ final class WatchPlayer: ObservableObject {
             availableIndices: avail,
             using: &rng
         )
+        WatchDiagnostics.shared.log("advance(\(forward ? "next" : "prev")) -> \(result) | available \(avail.count)")
         switch result {
         case .play(let idx):
             currentIndex = idx
@@ -522,6 +558,8 @@ final class WatchPlayer: ObservableObject {
         playbackGeneration += 1
         let gen = playbackGeneration
         playbackWatchdog.trackStarted()
+        endOfItemDetector.reset()
+        WatchDiagnostics.shared.log("play #\(index) \"\(track.title.prefix(30))\" (\(track.durationSeconds)s)")
 
         CrashBreadcrumb.mark(.startingTrack(track.title))
         currentIndex = index
@@ -557,7 +595,7 @@ final class WatchPlayer: ObservableObject {
     /// recurses or crashes when many/all tracks are missing.
     private func handleUnplayable(track: Track, reason: String) {
         consecutiveFailures += 1
-        print("[Player] Skip \(track.title): \(reason) (\(consecutiveFailures)/\(Self.maxConsecutiveFailures))")
+        WatchDiagnostics.shared.log("skip \"\(track.title.prefix(30))\": \(reason) (\(consecutiveFailures)/\(Self.maxConsecutiveFailures))")
         guard consecutiveFailures < Self.maxConsecutiveFailures else {
             consecutiveFailures = 0
             error = "No playable tracks available"
@@ -591,6 +629,8 @@ final class WatchPlayer: ObservableObject {
         isPlaying = false
         currentTime = 0
         updateNowPlaying()
+        WatchDiagnostics.shared.log("playback stopped")
+        WatchBreadcrumb.settled()
     }
 
     /// Lazily create the ONE long-lived AVPlayer + its single time observer.
@@ -630,6 +670,7 @@ final class WatchPlayer: ObservableObject {
 
     private func beginPlayback(url: URL, generation: Int) {
         guard playbackGeneration == generation else { return }
+        cancelActivationTimeout()
 
         let avPlayer = ensurePlayer()
         removeItemObservers()
@@ -647,7 +688,10 @@ final class WatchPlayer: ObservableObject {
         endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.handleTrackFinished(generation: capturedGen) }
+            Task { @MainActor in
+                WatchDiagnostics.shared.log("end notification received")
+                self?.handleTrackFinished(generation: capturedGen)
+            }
         }
         failObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
@@ -735,12 +779,18 @@ final class WatchPlayer: ObservableObject {
 
                 // Track finished but the end notification never reached us: advance now
                 // instead of leaving playback stopped until the user skips by hand.
-                if EndOfItemDetector.isParkedAtEnd(
+                // Duration is read from the item the clock belongs to — mid-swap those can
+                // disagree, and a stale clock against a new shorter duration reads as an
+                // ending, skipping the track that just started.
+                let liveItem = player.currentItem
+                let sameItem = liveItem != nil && liveItem === self.playerItem
+                if self.endOfItemDetector.tick(
                     time: t,
-                    itemDuration: self.playerItem?.duration.seconds,
+                    itemDuration: sameItem ? liveItem?.duration.seconds : nil,
                     rate: player.rate,
                     intendsToPlay: self.isPlaying
                 ) {
+                    WatchDiagnostics.shared.log("end-of-item detected (no end notification) at \(String(format: "%.1f", t))s")
                     self.handleTrackFinished(generation: self.playbackGeneration)
                     return
                 }
@@ -758,6 +808,7 @@ final class WatchPlayer: ObservableObject {
                     assetDuration: self.playerItem?.duration.seconds
                 )
                 if outcome == .stalled {
+                    WatchDiagnostics.shared.log("stall detected at \(String(format: "%.1f", t))s of \(String(format: "%.1f", self.duration))s")
                     self.handleTrackFinished(generation: self.playbackGeneration)
                 }
             }
@@ -770,18 +821,19 @@ final class WatchPlayer: ObservableObject {
         case .none:
             return false
         case .nudge:
-            print("[Player] Watchdog: silent while playing — re-issuing play()")
+            WatchDiagnostics.shared.log("watchdog nudge: silent while playing, re-issuing play()")
             player.play()
             return false
         case .skip:
             let track = currentTrack ?? Track(id: "", videoId: "", title: "?", artist: "", durationSeconds: 0)
             finishedGeneration = playbackGeneration // dedupe a late end notification
+            WatchDiagnostics.shared.log("watchdog skip: no playback for 8s")
             handleUnplayable(track: track, reason: "no playback for 8s")
             return true
         case .giveUp:
             // Two tracks in a row never produced audio: the problem isn't the files.
             // Stop cleanly rather than cycling the whole library every 8 seconds.
-            print("[Player] Watchdog: consecutive tracks never played — stopping")
+            WatchDiagnostics.shared.log("watchdog gave up: two tracks in a row never played")
             pause()
             error = "Playback stopped. Check your headphones and tap play."
             return true
@@ -834,8 +886,14 @@ final class WatchPlayer: ObservableObject {
     /// detection, stall detection) so a track is only advanced once.
     private func handleTrackFinished(generation: Int) {
         // Only act on the currently-playing generation, and only once for it.
-        guard generation == playbackGeneration else { return }
-        guard finishedGeneration != generation else { return }
+        guard generation == playbackGeneration else {
+            WatchDiagnostics.shared.log("finish ignored: stale generation \(generation) vs \(playbackGeneration)")
+            return
+        }
+        guard finishedGeneration != generation else {
+            WatchDiagnostics.shared.log("finish ignored: already handled generation \(generation)")
+            return
+        }
         finishedGeneration = generation
 
         // Sleep timer: end-of-track mode
@@ -1002,6 +1060,7 @@ final class WatchPlayer: ObservableObject {
         Task { @MainActor in
             switch type {
             case .began:
+                WatchDiagnostics.shared.log("audio interrupted (was playing: \(self.isPlaying))")
                 self.wasPlayingBeforeInterruption = self.isPlaying
                 self.sessionActivated = false
                 self.pause()
@@ -1049,6 +1108,7 @@ final class WatchPlayer: ObservableObject {
                 // headphones drop out routinely mid-run; previously that stopped playback
                 // for good. An interruption may already have paused us a moment earlier,
                 // so "was playing" also counts audio confirmed within the last few seconds.
+                WatchDiagnostics.shared.log("audio route lost (playing: \(self.isPlaying))")
                 let wasPlaying = self.isPlaying
                     || (self.lastAudibleAt.map { Date().timeIntervalSince($0) < 3 } ?? false)
                 self.pause() // clears any older route-loss marker
@@ -1057,7 +1117,7 @@ final class WatchPlayer: ObservableObject {
                 guard let lost = self.routeLossPauseDate,
                       Date().timeIntervalSince(lost) < Self.routeResumeWindow else { return }
                 self.routeLossPauseDate = nil
-                print("[Player] Headphones reconnected — resuming")
+                WatchDiagnostics.shared.log("audio route back — resuming")
                 // Re-activate first: the session may have been torn down with the route.
                 AVAudioSession.sharedInstance().activate(options: []) { success, _ in
                     Task { @MainActor in

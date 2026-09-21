@@ -76,7 +76,10 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         Task { @MainActor in
             CrashBreadcrumb.mark(.validatingDownloads)
             let ids = Array(availableTrackIds() ?? [])
-            guard !ids.isEmpty else { return }
+            guard !ids.isEmpty else {
+                WatchBreadcrumb.settled()
+                return
+            }
             var validated = Set(UserDefaults.standard.stringArray(forKey: Self.validatedKey) ?? [])
             var corrupt: [String] = []
             var newlyValidated: [String] = []
@@ -104,7 +107,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             }
             if corrupt.isEmpty {
                 UserDefaults.standard.set(Array(validated), forKey: Self.validatedKey)
-                print("[Receiver] Launch validation: all \(ids.count) files OK")
+                WatchDiagnostics.shared.log("launch validation: all \(ids.count) files OK")
+                WatchBreadcrumb.settled()
                 return
             }
 
@@ -117,6 +121,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             _cachedTrackIds = nil
             refreshAvailable()
             requestRedownload(videoIds: corrupt)
+            WatchDiagnostics.shared.log("launch validation: deleted \(corrupt.count) corrupt files")
+            WatchBreadcrumb.settled()
         }
     }
 
@@ -442,6 +448,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 // Terminal point of the burst: persist now instead of trusting the
                 // debounce, which the app can be suspended inside of.
                 self.flushLibraryNow()
+                WatchDiagnostics.shared.log("wifi sync burst finished (\(self.syncedTrackCount) received)")
+                WatchBreadcrumb.settled()
 
                 // Clear sync progress after a delay
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -542,7 +550,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
         CrashBreadcrumb.mark(.applyingMetadata(applied))
         consolidateDuplicateTitles()
         flushLibraryNow()
-        print("[Receiver] Recovered metadata for \(applied) tracks")
+        WatchDiagnostics.shared.log("recovered metadata for \(applied) tracks")
+        WatchBreadcrumb.settled()
     }
 
     /// True when `playlists` holds changes that haven't been written to disk yet.
@@ -942,6 +951,8 @@ extension WatchFileReceiver: WCSessionDelegate {
                 self.receivingCount = max(0, self.receivingCount - 1)
                 if self.receivingCount == 0 {
                     self.flushLibraryNow()
+                    WatchDiagnostics.shared.log("bluetooth sync burst finished")
+                    WatchBreadcrumb.settled()
 
                     // Reset sync progress when all transfers done
                     Task { @MainActor in
@@ -1123,6 +1134,7 @@ extension WatchFileReceiver: WCSessionDelegate {
                     self.upsertPlaylist(playlist)
                 }
                 self.cleanupOrphanedFiles()
+                WatchBreadcrumb.settled()
             case .deleteTrack:
                 if let videoId { self.deleteTrack(videoId: videoId) }
             default:

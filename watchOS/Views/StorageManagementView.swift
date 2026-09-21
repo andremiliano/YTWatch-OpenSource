@@ -2,7 +2,9 @@ import SwiftUI
 
 struct StorageManagementView: View {
     @ObservedObject private var receiver = WatchFileReceiver.shared
+    @ObservedObject private var diagnostics = WatchDiagnostics.shared
     @State private var playlistSizes: [(Playlist, Double)] = []
+    @State private var exportMessage: String?
 
     var body: some View {
         ScrollView {
@@ -112,7 +114,7 @@ struct StorageManagementView: View {
 
                     // What the app was doing when it last died. There are no readable
                     // crash logs for this app, so this is the one concrete clue.
-                    if let lastCrash = CrashBreadcrumb.lastUnclean {
+                    if let lastCrash = CrashBreadcrumb.summary {
                         Text("Last unexpected stop")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(Color(white: 0.35))
@@ -125,7 +127,45 @@ struct StorageManagementView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, 10)
-                .padding(.bottom, 4)
+
+                // Send the event log to the iPhone. The transfer is queued by the system,
+                // so this works out on a run with the phone left at home — it arrives the
+                // next time the two are together.
+                Button {
+                    diagnostics.sendToPhone(reason: "manual")
+                    exportMessage = diagnostics.lastExportSummary
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("Send Diagnostics")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(white: 0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 10)
+
+                if let exportMessage {
+                    Text(exportMessage)
+                        .font(.system(size: 9))
+                        .foregroundStyle(Color(white: 0.5))
+                        .multilineTextAlignment(.center)
+                }
+
+                if CrashBreadcrumb.uncleanCount > 0 {
+                    Button("Clear crash history") {
+                        CrashBreadcrumb.clearHistory()
+                        exportMessage = "Cleared"
+                    }
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(white: 0.4))
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
+                }
             }
             .padding(.horizontal, 8)
         }

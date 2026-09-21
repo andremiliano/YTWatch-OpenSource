@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @ObservedObject private var client = YTMusicClient.shared
@@ -7,6 +8,7 @@ struct SettingsView: View {
     @State private var showLogoutConfirm = false
     @State private var showClearAllConfirm = false
     @State private var showSendRemainingConfirm = false
+    @State private var showDiagnosticsShare = false
     @State private var appeared = false
 
     @State private var estimatedWatchStorage: String = "—"
@@ -324,6 +326,49 @@ struct SettingsView: View {
                             }
                         }
 
+                        // Watch diagnostics — the Watch sends its event log here; this is
+                        // the only way to get it off the Watch, which is used away from
+                        // the phone and has no readable crash logs.
+                        SettingsSection(title: "Diagnostics") {
+                            if let received = sync.watchDiagnosticsReceivedAt {
+                                Button {
+                                    showDiagnosticsShare = true
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "square.and.arrow.up")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(.blue)
+                                            .frame(width: 28, height: 28)
+                                            .background(Color.blue.opacity(0.12))
+                                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text("Share Watch Log")
+                                                .font(.system(size: 15))
+                                                .foregroundStyle(.white)
+                                            Text("Received \(received.formatted(date: .abbreviated, time: .shortened))")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(Color.appFaint)
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 13)
+                                }
+                                .buttonStyle(.plain)
+                            } else {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("No Watch log yet")
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.white)
+                                    Text("On the Watch: Storage → Send Diagnostics. It arrives next time the Watch is near this iPhone.")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(Color.appFaint)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 13)
+                            }
+                        }
+
                         // About
                         SettingsSection(title: "About") {
                             SettingsRow(icon: "waveform", iconColor: Color.ytRed, label: "iPhone App", value: AppVersion.display)
@@ -347,6 +392,9 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbarBackground(Color.appBg, for: .navigationBar)
             .toolbarColorScheme(.dark, for: .navigationBar)
+            .sheet(isPresented: $showDiagnosticsShare) {
+                ShareSheet(items: [WatchSyncManager.watchDiagnosticsURL])
+            }
             .alert("Send to Watch?", isPresented: $showSendRemainingConfirm) {
                 Button("Send \(sync.unsyncedDownloadCount) tracks") { sync.syncUnsyncedDownloads() }
                 Button("Cancel", role: .cancel) {}
@@ -377,6 +425,18 @@ struct SettingsView: View {
 }
 
 // MARK: - Components
+
+/// System share sheet — lets the Watch log be saved to Files, AirDropped to a Mac, or
+/// sent on to someone who can read it.
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
 
 private struct SettingsSection<Content: View>: View {
     let title: String

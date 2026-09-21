@@ -261,7 +261,13 @@ struct PlaylistListView: View {
                     }
                 }
             }
-            .onAppear { receiver.rescanFiles() }
+            .onAppear {
+                // The launch marker stays set until the first view exists, so a crash in
+                // the launch path is attributed to "launching" rather than to whatever
+                // background work happened to run last.
+                WatchBreadcrumb.settled()
+                receiver.rescanFiles()
+            }
             // Sync progress overlay
             .overlay(alignment: .bottomTrailing) {
                 if receiver.receivingCount > 0 {

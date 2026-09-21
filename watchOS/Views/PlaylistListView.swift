@@ -7,6 +7,7 @@ struct PlaylistListView: View {
     @State private var isRefreshing = false
     @State private var searchText = ""
     @State private var showSearch = false
+    @State private var diagnosticsMessage: String?
 
     private var filteredPlaylists: [Playlist] {
         let all = receiver.availablePlaylists
@@ -63,6 +64,35 @@ struct PlaylistListView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(Color(white: 0.3))
                             .multilineTextAlignment(.center)
+
+                        // Also offered here: an empty library usually means sync failed,
+                        // which is precisely when the log is worth having.
+                        Button {
+                            WatchDiagnostics.shared.sendToPhone(reason: "manual (empty library)")
+                            diagnosticsMessage = WatchDiagnostics.shared.lastExportSummary
+                        } label: {
+                            Text("Send Diagnostics")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Color(white: 0.5))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(Color(white: 0.1))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 8)
+
+                        if let diagnosticsMessage {
+                            Text(diagnosticsMessage)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color(white: 0.45))
+                                .multilineTextAlignment(.center)
+                        }
+
+                        Text("v\(AppVersion.display)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(Color(white: 0.28))
+                            .padding(.top, 4)
                     }
                     .padding(.horizontal, 16)
                 } else {
@@ -232,6 +262,48 @@ struct PlaylistListView: View {
                             .tint(Color.ytRed)
                             .padding(.horizontal, 8)
                             .padding(.top, 6)
+
+                            // Diagnostics, on the main screen rather than buried behind the
+                            // storage bar: it's needed exactly when something has gone wrong,
+                            // which is the worst time to go hunting for it.
+                            Button {
+                                WatchDiagnostics.shared.sendToPhone(reason: "manual")
+                                diagnosticsMessage = WatchDiagnostics.shared.lastExportSummary
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(Color(white: 0.5))
+                                    Text("Send Diagnostics")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(Color(white: 0.5))
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(Color(white: 0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.top, 8)
+
+                            if let diagnosticsMessage {
+                                Text(diagnosticsMessage)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color(white: 0.45))
+                                    .multilineTextAlignment(.center)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 2)
+                            }
+
+                            // Build number in plain sight — the first question after any
+                            // report is which build is actually installed.
+                            Text("v\(AppVersion.display)")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(Color(white: 0.28))
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 6)
+                                .padding(.bottom, 2)
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)

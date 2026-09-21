@@ -559,7 +559,7 @@ final class WatchPlayer: ObservableObject {
         let gen = playbackGeneration
         playbackWatchdog.trackStarted()
         endOfItemDetector.reset()
-        WatchDiagnostics.shared.log("play #\(index) \"\(track.title.prefix(30))\" (\(track.durationSeconds)s)")
+        WatchDiagnostics.shared.log("play #\(index) \"\(track.title.prefix(30))\" (\(track.durationSeconds)s) \(WatchDiagnostics.memoryNote)")
 
         CrashBreadcrumb.mark(.startingTrack(track.title))
         currentIndex = index

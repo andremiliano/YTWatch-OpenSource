@@ -68,7 +68,15 @@ enum CrashBreadcrumb {
     static var lastUnclean: String? { UserDefaults.standard.string(forKey: lastUncleanKey) }
     static var lastUncleanDate: Date? { UserDefaults.standard.object(forKey: lastUncleanDateKey) as? Date }
     /// How many unexpected stops have been recorded — tells a one-off from a recurring one.
-    static var uncleanCount: Int { UserDefaults.standard.integer(forKey: uncleanCountKey) }
+    ///
+    /// Counts only started being kept in 1.2.0, so a stop recorded by an earlier build has
+    /// a marker but no count. Report it as one rather than as zero, which read as a
+    /// contradiction next to a named crash.
+    static var uncleanCount: Int {
+        let stored = UserDefaults.standard.integer(forKey: uncleanCountKey)
+        if stored == 0, lastUnclean != nil { return 1 }
+        return stored
+    }
 
     /// e.g. "playing Some Song · 21 Sep 2026 14:03 (3rd)"
     static var summary: String? {

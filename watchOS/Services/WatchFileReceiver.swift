@@ -71,6 +71,9 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     /// files are deleted and the phone is asked to re-send them. Runs in the background,
     /// throttled, so it never blocks the UI. This keeps a bad file from crashing playback.
     private static let validatedKey = "validatedTrackIds"
+    private static let validationVersionKey = "validationVersion"
+    /// Raise to force one full re-check when the validation rules get stricter.
+    private static let validationVersion = 2
 
     func validateDownloadsOnLaunch() {
         Task { @MainActor in
@@ -80,7 +83,25 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 WatchBreadcrumb.settled()
                 return
             }
+
+            // How long each track is supposed to be, so a part-downloaded file can be told
+            // from a complete one.
+            var expectedDurations: [String: Int] = [:]
+            for playlist in playlists {
+                for track in playlist.tracks where track.durationSeconds > 0 {
+                    expectedDurations[track.videoId] = track.durationSeconds
+                }
+            }
+
+            // Files already passed by an older, weaker check are marked validated and would
+            // never be looked at again — including the truncated ones. Bumping the version
+            // re-checks everything once.
             var validated = Set(UserDefaults.standard.stringArray(forKey: Self.validatedKey) ?? [])
+            if UserDefaults.standard.integer(forKey: Self.validationVersionKey) < Self.validationVersion {
+                WatchDiagnostics.shared.log("re-validating \(ids.count) files against expected durations")
+                validated = []
+                UserDefaults.standard.set(Self.validationVersion, forKey: Self.validationVersionKey)
+            }
             var corrupt: [String] = []
             var newlyValidated: [String] = []
 
@@ -95,10 +116,15 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 }
                 // Deep playability check only once per file (cached), so later launches are cheap.
                 if validated.contains(id) { continue }
-                if await Self.isPlayable(url) {
-                    newlyValidated.append(id)
-                } else {
+                guard let actual = await Self.playableDuration(url) else {
                     corrupt.append(id)
+                    continue
+                }
+                if Self.isTruncated(actualSeconds: actual, expectedSeconds: expectedDurations[id] ?? 0) {
+                    WatchDiagnostics.shared.log("truncated: \(id) has \(Int(actual))s of \(expectedDurations[id] ?? 0)s — re-downloading")
+                    corrupt.append(id)
+                } else {
+                    newlyValidated.append(id)
                 }
             }
 
@@ -128,14 +154,34 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
     /// Validate that AVFoundation can actually play a file (catches non-truncated corruption).
     nonisolated static func isPlayable(_ url: URL) async -> Bool {
+        await playableDuration(url) != nil
+    }
+
+    /// How much audio a file actually contains, or nil if it can't be played at all.
+    nonisolated static func playableDuration(_ url: URL) async -> Double? {
         let asset = AVURLAsset(url: url)
         do {
             let playable = try await asset.load(.isPlayable)
             let duration = try await asset.load(.duration)
-            return playable && !duration.seconds.isNaN && duration.seconds > 0
+            guard playable, !duration.seconds.isNaN, duration.seconds > 0 else { return nil }
+            return duration.seconds
         } catch {
-            return false
+            return nil
         }
+    }
+
+    /// A part-downloaded file is still a valid, playable m4a — it just stops early. The
+    /// diagnostics log caught a 237s track whose audio ran out after 19 seconds, and another
+    /// at 126s of 262s: nothing skipped them, the audio simply ended. Size and playability
+    /// checks both pass on those, so the only way to catch them is to compare the audio
+    /// against the length the track is supposed to be.
+    ///
+    /// Deliberately lenient — a file is only rejected when it is both a quarter short *and*
+    /// more than 30s short, so ordinary metadata inaccuracy never deletes a good download.
+    static func isTruncated(actualSeconds: Double, expectedSeconds: Int) -> Bool {
+        guard expectedSeconds > 30 else { return false } // unknown or very short: can't judge
+        let expected = Double(expectedSeconds)
+        return actualSeconds < expected * 0.75 && expected - actualSeconds > 30
     }
 
     /// Ask the phone to re-send specific tracks (missing or corrupt on the Watch).

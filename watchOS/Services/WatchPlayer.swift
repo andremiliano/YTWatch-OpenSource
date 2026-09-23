@@ -871,6 +871,12 @@ final class WatchPlayer: ObservableObject {
         // → tracks skip mid-play. Keep the two mechanisms independent.
 
         timeObserverTick += 1
+        // Every 30s while playing. The log showed a track start, the wrist going down, and
+        // then four minutes of nothing — silence in the log is the only way to tell the app
+        // being suspended from it mishandling the end of a track.
+        if timeObserverTick % 60 == 0 {
+            WatchDiagnostics.shared.log("playing \(Int(t))s/\(Int(duration))s \(WatchDiagnostics.memoryNote)")
+        }
         if needsNowPlayingUpdate || timeObserverTick % 2 == 0 {
             updateNowPlaying()
         }
@@ -901,6 +907,16 @@ final class WatchPlayer: ObservableObject {
         }
         finishedGeneration = generation
         WatchDiagnostics.shared.log("track finished at \(Int(currentTime))s of \(Int(duration))s stated")
+
+        // A file that runs out well before the track's stated length is a part-finished
+        // download, not a skip — it just sounds like the music stopping. Ask the phone for
+        // a complete copy; playback still advances normally below.
+        let statedLength = knownTrackDuration > 0 ? knownTrackDuration : duration
+        if currentTime > 1, WatchFileReceiver.isTruncated(actualSeconds: currentTime, expectedSeconds: Int(statedLength)),
+           let videoId = currentTrack?.videoId {
+            WatchDiagnostics.shared.log("ENDED EARLY — \(Int(currentTime))s of \(Int(statedLength))s; requesting a fresh copy")
+            WatchFileReceiver.shared.requestRedownload(videoIds: [videoId])
+        }
 
         // Sleep timer: end-of-track mode
         if isSleepTimerEndOfTrack {

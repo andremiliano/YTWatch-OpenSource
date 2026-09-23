@@ -22,8 +22,8 @@ settings:
     # Keep these in step with what's uploaded: the archive passes
     # CURRENT_PROJECT_VERSION on the command line, and App Store Connect rejects any
     # build number it has already seen, so bump this here whenever a build ships.
-    MARKETING_VERSION: "1.2.3"
-    CURRENT_PROJECT_VERSION: "58"
+    MARKETING_VERSION: "1.3.0"
+    CURRENT_PROJECT_VERSION: "59"
   configs:
     Debug:
       ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT: YES

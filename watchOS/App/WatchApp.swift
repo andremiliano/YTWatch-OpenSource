@@ -14,6 +14,8 @@ struct YTWatchWatchApp: App {
         _ = WatchFileReceiver.shared  // activate WCSession
         WatchPlayer.shared.configureAudioSession()
 
+        // Install before anything else can fail, writing into the same log file.
+        WatchCrashReporter.install(logPath: WatchDiagnostics.shared.logURL.path)
         WatchDiagnostics.shared.log("launch \(AppVersion.display)")
         if let previous {
             WatchDiagnostics.shared.log("PREVIOUS RUN ENDED UNEXPECTEDLY during: \(previous)")

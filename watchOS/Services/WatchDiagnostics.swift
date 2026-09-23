@@ -13,7 +13,7 @@ final class WatchDiagnostics: ObservableObject {
     static let shared = WatchDiagnostics()
 
     /// Kept small: this lives on a memory-tight device and is only a recent history.
-    private static let maxEntries = 600
+    private static let maxEntries = 1200
 
     @Published private(set) var lastExportSummary: String?
 
@@ -24,7 +24,7 @@ final class WatchDiagnostics: ObservableObject {
     private var lastExportAt: Date?
     private let fm = FileManager.default
 
-    private var logURL: URL {
+    var logURL: URL {
         fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("diagnostics.log")
     }

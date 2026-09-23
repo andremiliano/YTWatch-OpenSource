@@ -169,6 +169,7 @@ final class WatchPlayer: ObservableObject {
         // waiting, the stall timer is stopped and no item is installed, so nothing else is
         // watching: playback would die silently showing the new track's title. Time it out.
         startActivationTimeout(generation: generation)
+        WatchDiagnostics.shared.log("  activating audio session")
         let session = AVAudioSession.sharedInstance()
         session.activate(options: []) { [weak self] success, activationError in
             Task { @MainActor in
@@ -196,6 +197,7 @@ final class WatchPlayer: ObservableObject {
                 }
                 self.activationRetryCount = 0
                 self.sessionActivated = true
+                WatchDiagnostics.shared.log("  audio session active")
                 self.beginPlayback(url: url, generation: generation)
             }
         }
@@ -317,7 +319,7 @@ final class WatchPlayer: ObservableObject {
         // A finished item is still loaded, parked at its end, so "play" on it would be
         // silent — move on to the next track instead.
         if player?.currentItem != nil, finishedGeneration == playbackGeneration {
-            advanceQueue(forward: true)
+            advanceQueue(forward: true, reason: "play pressed on a finished track")
             return
         }
         guard player?.currentItem != nil else {
@@ -352,7 +354,7 @@ final class WatchPlayer: ObservableObject {
 
     func next() {
         playbackWatchdog.userTookControl()
-        advanceQueue(forward: true)
+        advanceQueue(forward: true, reason: "user tapped next")
     }
 
     func previous() {
@@ -360,7 +362,7 @@ final class WatchPlayer: ObservableObject {
         if currentTime > 3 {
             seek(to: 0)
         } else {
-            advanceQueue(forward: false)
+            advanceQueue(forward: false, reason: "user tapped previous")
         }
     }
 
@@ -488,7 +490,7 @@ final class WatchPlayer: ObservableObject {
         queue.build(availableIndices: avail, startAt: index, shuffled: isShuffled, using: &rng)
     }
 
-    private func advanceQueue(forward: Bool) {
+    private func advanceQueue(forward: Bool, reason: String = "unspecified") {
         CrashBreadcrumb.mark(.advancingQueue)
         guard let playlist = currentPlaylist else { return }
         let avail = availableIndices(in: playlist)
@@ -498,7 +500,7 @@ final class WatchPlayer: ObservableObject {
             availableIndices: avail,
             using: &rng
         )
-        WatchDiagnostics.shared.log("advance(\(forward ? "next" : "prev")) -> \(result) | available \(avail.count)")
+        WatchDiagnostics.shared.log("advance \(reason) -> \(result) | available \(avail.count)")
         switch result {
         case .play(let idx):
             currentIndex = idx
@@ -608,7 +610,7 @@ final class WatchPlayer: ObservableObject {
         let gen = playbackGeneration
         Task { @MainActor in
             guard self.playbackGeneration == gen else { return } // user already moved on
-            self.advanceQueue(forward: true)
+            self.advanceQueue(forward: true, reason: "unplayable track")
         }
     }
 
@@ -677,6 +679,7 @@ final class WatchPlayer: ObservableObject {
 
         // No precise-timing key — that forces a full-file parse per track (memory/CPU).
         // We rely on metadata `knownTrackDuration` for end detection instead.
+        WatchDiagnostics.shared.log("  creating player item")
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
         playerItem = item
@@ -709,6 +712,7 @@ final class WatchPlayer: ObservableObject {
                       self.playerItem === observedItem else { return }
                 switch status {
                 case .readyToPlay:
+                    WatchDiagnostics.shared.log("  item ready (asset \(dur.isNaN ? -1 : dur.rounded())s)")
                     self.consecutiveFailures = 0 // successful start resets the skip guard
                     // beginPlayback already requested playback and set the intent. Re-issue
                     // play() only if that intent still stands, so pausing while a track is
@@ -764,6 +768,7 @@ final class WatchPlayer: ObservableObject {
         avPlayer.play()
         isPlaying = true
         startStallTimer()
+        WatchDiagnostics.shared.log("  item installed, play requested")
     }
 
     private func startStallTimer() {
@@ -895,6 +900,7 @@ final class WatchPlayer: ObservableObject {
             return
         }
         finishedGeneration = generation
+        WatchDiagnostics.shared.log("track finished at \(Int(currentTime))s of \(Int(duration))s stated")
 
         // Sleep timer: end-of-track mode
         if isSleepTimerEndOfTrack {
@@ -910,7 +916,7 @@ final class WatchPlayer: ObservableObject {
             playTrack(at: currentIndex)
         case .all, .none:
             // advanceQueue handles end-of-queue: .all restarts, .none moves to next album
-            advanceQueue(forward: true)
+            advanceQueue(forward: true, reason: "track finished")
         }
     }
 
@@ -989,6 +995,7 @@ final class WatchPlayer: ObservableObject {
         if let cached = cachedArtwork, cached.videoId == track.videoId {
             return cached.artwork
         }
+        WatchDiagnostics.shared.log("  decoding artwork")
         guard let url = WatchFileReceiver.shared.thumbnailURL(for: track.videoId),
               let image = Self.downsampledImage(at: url, maxPixel: 300) else { return nil }
         let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }

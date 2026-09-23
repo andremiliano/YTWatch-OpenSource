@@ -56,6 +56,7 @@
 		E1BC708CB7843FDB5F2D57E6 /* CrashBreadcrumb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BE9EEFCC6D26144181EEF88 /* CrashBreadcrumb.swift */; };
 		E36C4C61022C96340669558F /* WatchMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59FA3BF8065286B952EEB1F7 /* WatchMessage.swift */; };
 		E8835BEECCCB24E9322C021A /* PlaybackWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00FD80FA0FD42D9C5D3F445F /* PlaybackWatchdog.swift */; };
+		F1D3949078449D1312064E75 /* WatchCrashReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24DC35BDC68604147AA69D2F /* WatchCrashReporter.swift */; };
 		F9F924D64059EFC7DD3E93EA /* PlaybackQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C03C258165F72071B8FD365 /* PlaybackQueue.swift */; };
 		FCD80C55BBDAC570776EEEF5 /* ForYouView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 557111319ED3FF3B6D01FB88 /* ForYouView.swift */; };
 /* End PBXBuildFile section */
@@ -89,6 +90,7 @@
 		08AD581FF386A5EB6AFECD31 /* DownloadsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsListView.swift; sourceTree = "<group>"; };
 		09A4619D2E2FEA88BB78ED91 /* PlaylistListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistListView.swift; sourceTree = "<group>"; };
 		1C03C258165F72071B8FD365 /* PlaybackQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackQueue.swift; sourceTree = "<group>"; };
+		24DC35BDC68604147AA69D2F /* WatchCrashReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchCrashReporter.swift; sourceTree = "<group>"; };
 		2BE9EEFCC6D26144181EEF88 /* CrashBreadcrumb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashBreadcrumb.swift; sourceTree = "<group>"; };
 		32EAE5FFB5EA692D4041783F /* LibraryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryStore.swift; sourceTree = "<group>"; };
 		346FF76E5A956D803B4E7C7A /* WatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchApp.swift; sourceTree = "<group>"; };
@@ -263,6 +265,7 @@
 		E69373DDA3E28EFC1569C207 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				24DC35BDC68604147AA69D2F /* WatchCrashReporter.swift */,
 				9D243A22AF8C806CFB886219 /* WatchDiagnostics.swift */,
 				C1FBA72831E785A4D087D397 /* WatchFileReceiver.swift */,
 				86D2B9954FCE584D6F5A9B6B /* WatchPlayer.swift */,
@@ -391,6 +394,7 @@
 				95A875AC0EAE037DF456C4AC /* Track.swift in Sources */,
 				5A69A0747999140453D9A3C6 /* TrackListView.swift in Sources */,
 				0C0A0B8E138B2F2AF2B51CB1 /* WatchApp.swift in Sources */,
+				F1D3949078449D1312064E75 /* WatchCrashReporter.swift in Sources */,
 				5DE70C936A77DF4B1616BAC9 /* WatchDiagnostics.swift in Sources */,
 				B055738BF39CB16E101B2034 /* WatchFileReceiver.swift in Sources */,
 				E36C4C61022C96340669558F /* WatchMessage.swift in Sources */,
@@ -491,7 +495,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_CONCURRENCY_CHECKING = complete;
@@ -505,7 +509,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -601,7 +605,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 57;
+				CURRENT_PROJECT_VERSION = 58;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_CONCURRENCY_CHECKING = complete;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -621,7 +625,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.2.2;
+				MARKETING_VERSION = 1.2.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

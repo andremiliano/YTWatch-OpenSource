@@ -727,7 +727,7 @@ final class WatchPlayer: ObservableObject {
                     // Persisting is deferred, so this stays cheap.
                     if self.knownTrackDuration <= 0, !dur.isNaN, dur > 0 {
                         self.duration = dur
-                        if let vid = self.currentTrack?.videoId {
+                        if let vid = self.currentTrack?.videoId, dur.isFinite, dur < 100_000 {
                             WatchFileReceiver.shared.updateTrackDuration(videoId: vid, duration: Int(dur.rounded()))
                         }
                     }
@@ -875,7 +875,7 @@ final class WatchPlayer: ObservableObject {
         // then four minutes of nothing — silence in the log is the only way to tell the app
         // being suspended from it mishandling the end of a track.
         if timeObserverTick % 60 == 0 {
-            WatchDiagnostics.shared.log("playing \(Int(t))s/\(Int(duration))s \(WatchDiagnostics.memoryNote)")
+            WatchDiagnostics.shared.log("playing \(WatchDiagnostics.seconds(t))/\(WatchDiagnostics.seconds(duration)) \(WatchDiagnostics.memoryNote)")
         }
         if needsNowPlayingUpdate || timeObserverTick % 2 == 0 {
             updateNowPlaying()
@@ -906,15 +906,17 @@ final class WatchPlayer: ObservableObject {
             return
         }
         finishedGeneration = generation
-        WatchDiagnostics.shared.log("track finished at \(Int(currentTime))s of \(Int(duration))s stated")
+        WatchDiagnostics.shared.log("track finished at \(WatchDiagnostics.seconds(currentTime)) of \(WatchDiagnostics.seconds(duration)) stated")
 
         // A file that runs out well before the track's stated length is a part-finished
         // download, not a skip — it just sounds like the music stopping. Ask the phone for
         // a complete copy; playback still advances normally below.
         let statedLength = knownTrackDuration > 0 ? knownTrackDuration : duration
-        if currentTime > 1, WatchFileReceiver.isTruncated(actualSeconds: currentTime, expectedSeconds: Int(statedLength)),
+        // AVFoundation reports NaN/infinity for an unknown duration, and Int() traps on both.
+        let statedWhole = statedLength.isFinite && statedLength < 100_000 ? Int(statedLength) : 0
+        if currentTime > 1, WatchFileReceiver.isTruncated(actualSeconds: currentTime, expectedSeconds: statedWhole),
            let videoId = currentTrack?.videoId {
-            WatchDiagnostics.shared.log("ENDED EARLY — \(Int(currentTime))s of \(Int(statedLength))s; requesting a fresh copy")
+            WatchDiagnostics.shared.log("ENDED EARLY — \(WatchDiagnostics.seconds(currentTime)) of \(WatchDiagnostics.seconds(statedLength)); requesting a fresh copy")
             WatchFileReceiver.shared.requestRedownload(videoIds: [videoId])
         }
 

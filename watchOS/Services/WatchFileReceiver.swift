@@ -72,16 +72,36 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     /// throttled, so it never blocks the UI. This keeps a bad file from crashing playback.
     private static let validatedKey = "validatedTrackIds"
     private static let validationVersionKey = "validationVersion"
-    /// Raise to force one full re-check when the validation rules get stricter.
+    /// Raise to force a re-check when the validation rules get stricter. The re-check is
+    /// spread across launches rather than done in one pass.
     private static let validationVersion = 2
+    /// Set while a deep pass is running; a value still set at launch means the last pass
+    /// never finished, which is the signal to skip it rather than repeat it.
+    private static let validationInProgressKey = "validationInProgress"
+    /// Each deep check parses an audio file. A handful per launch covers the library over
+    /// normal use without ever making startup expensive.
+    private static let maxDeepChecksPerLaunch = 25
 
     func validateDownloadsOnLaunch() {
         Task { @MainActor in
+            // Let the app finish launching and draw before touching hundreds of files.
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+
             CrashBreadcrumb.mark(.validatingDownloads)
             let ids = Array(availableTrackIds() ?? [])
             guard !ids.isEmpty else {
                 WatchBreadcrumb.settled()
                 return
+            }
+
+            // If the previous run set this flag and never cleared it, validation did not
+            // finish — quite possibly because it was what killed the app. Skip the deep
+            // pass this launch instead of repeating whatever went wrong; the flag is
+            // cleared now, so the next launch tries again, one small batch at a time.
+            let previousRunDidNotFinish = UserDefaults.standard.bool(forKey: Self.validationInProgressKey)
+            UserDefaults.standard.set(false, forKey: Self.validationInProgressKey)
+            if previousRunDidNotFinish {
+                WatchDiagnostics.shared.log("skipping deep validation: previous attempt did not finish")
             }
 
             // How long each track is supposed to be, so a part-downloaded file can be told
@@ -104,6 +124,11 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             }
             var corrupt: [String] = []
             var newlyValidated: [String] = []
+            var deepChecks = 0
+            let deepChecksAllowed = previousRunDidNotFinish ? 0 : Self.maxDeepChecksPerLaunch
+            if deepChecksAllowed > 0 {
+                UserDefaults.standard.set(true, forKey: Self.validationInProgressKey)
+            }
 
             for (i, id) in ids.enumerated() {
                 if i % 5 == 4 { try? await Task.sleep(nanoseconds: 30_000_000) } // yield, never hitch UI
@@ -114,22 +139,32 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                     corrupt.append(id)
                     continue
                 }
-                // Deep playability check only once per file (cached), so later launches are cheap.
+                // Deep playability check only once per file (cached), so later launches are
+                // cheap — and only a few per launch, because each one parses an audio file.
+                // Doing all of them at once was enough to get the app killed during startup,
+                // and with progress saved only at the end every relaunch started over.
                 if validated.contains(id) { continue }
+                guard deepChecks < deepChecksAllowed else { continue } // leave for a later launch
+                deepChecks += 1
+
                 guard let actual = await Self.playableDuration(url) else {
                     corrupt.append(id)
                     continue
                 }
                 if Self.isTruncated(actualSeconds: actual, expectedSeconds: expectedDurations[id] ?? 0) {
-                    WatchDiagnostics.shared.log("truncated: \(id) has \(Int(actual))s of \(expectedDurations[id] ?? 0)s — re-downloading")
+                    WatchDiagnostics.shared.log("truncated: \(id) has \(WatchDiagnostics.seconds(actual)) of \(expectedDurations[id] ?? 0)s — re-downloading")
                     corrupt.append(id)
                 } else {
                     newlyValidated.append(id)
+                    // Persist as we go: progress must survive whatever ends this run.
+                    validated.insert(id)
+                    UserDefaults.standard.set(Array(validated), forKey: Self.validatedKey)
                 }
             }
 
-            if !newlyValidated.isEmpty {
-                validated.formUnion(newlyValidated)
+            UserDefaults.standard.set(false, forKey: Self.validationInProgressKey)
+            if deepChecks > 0 {
+                WatchDiagnostics.shared.log("deep-checked \(deepChecks) files (\(ids.count - validated.count) still to do)")
             }
             if corrupt.isEmpty {
                 UserDefaults.standard.set(Array(validated), forKey: Self.validatedKey)

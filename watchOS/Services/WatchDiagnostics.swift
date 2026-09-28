@@ -155,6 +155,14 @@ final class WatchDiagnostics: ObservableObject {
         return Double(info.phys_footprint) / 1_048_576
     }
 
+    /// Formats a duration for the log. `Int(someDouble)` traps on NaN or infinity, and
+    /// AVFoundation hands back both for an item whose duration isn't known yet — a log
+    /// line must never be the thing that crashes playback.
+    static func seconds(_ value: Double) -> String {
+        guard value.isFinite, abs(value) < 1_000_000 else { return "?s" }
+        return "\(Int(value))s"
+    }
+
     /// e.g. "mem 41MB"
     static var memoryNote: String {
         guard let mb = memoryFootprintMB() else { return "mem ?" }

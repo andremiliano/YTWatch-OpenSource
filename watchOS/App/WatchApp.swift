@@ -19,9 +19,15 @@ struct YTWatchWatchApp: App {
         WatchDiagnostics.shared.log("launch \(AppVersion.display)")
         if let previous {
             WatchDiagnostics.shared.log("PREVIOUS RUN ENDED UNEXPECTEDLY during: \(previous)")
-            // Get the evidence off the Watch without the user having to remember. The
-            // transfer queues until the iPhone is next in range.
-            WatchDiagnostics.shared.sendToPhone(reason: "automatic after unexpected stop")
+            // Send the evidence without the user having to remember — but NOT here.
+            // Building the report walks the whole audio directory three times (file list,
+            // total size, free space); doing that inside init(), before the first frame,
+            // meant that after one crash every launch carried that cost, which is its own
+            // way to never start. Off the launch path, once the app is up.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                WatchDiagnostics.shared.sendToPhone(reason: "automatic after unexpected stop")
+            }
         }
     }
 

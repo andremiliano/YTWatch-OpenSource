@@ -1,62 +1,99 @@
 import Foundation
 import Darwin
 
-/// Captures the actual cause of a crash into the diagnostics log.
+/// Captures the actual cause of a crash, so it can be reported on the next launch.
 ///
-/// The breadcrumb only says which activity was running ("playing X"). The log shows the app
-/// dying 1–3s after playback starts with no error recorded and memory at ~15MB, so it is a
-/// fault, not a memory kill — but nothing so far names it. An uncaught Objective-C exception
-/// or a fatal signal is the likely shape, and both can be recorded before the process goes.
+/// Writes to its own file, `crash.log`, which nothing else ever rewrites. The earlier
+/// version shared diagnostics.log, whose trimming replaces the file with an atomic write —
+/// leaving this reporter's descriptor pointing at a deleted file, so every crash it
+/// recorded was lost. A non-empty crash.log at launch means the previous run crashed and
+/// says how.
 ///
-/// Handlers write with `write(2)` to a file descriptor opened up front: no allocation, no
-/// Swift runtime work on the failing path, and nothing buffered that could be lost.
+/// The signal path only calls write(2), backtrace(3), backtrace_symbols_fd(3), signal(3)
+/// and raise(3), using buffers allocated at install time. Allocating inside a signal
+/// handler can deadlock on the malloc lock (for example when the crash is itself heap
+/// corruption), which turns a crash into a hang and records nothing.
 enum WatchCrashReporter {
-    nonisolated(unsafe) private static var logFD: Int32 = -1
+    nonisolated(unsafe) private static var fd: Int32 = -1
+    nonisolated(unsafe) private static var frames: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+    nonisolated(unsafe) private static var digits: UnsafeMutablePointer<UInt8>?
+    private static let frameCapacity: Int32 = 48
+    private static let digitCapacity = 16
 
-    static func install(logPath: String) {
-        logPath.withCString { path in
-            logFD = open(path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
-        }
-        guard logFD >= 0 else { return }
+    static var crashLogURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("crash.log")
+    }
 
-        // Must be fully qualified: a C function pointer can't capture context, and an
-        // unqualified call to a sibling static implicitly captures the metatype.
+    /// Call first in App.init(), before anything that can fail.
+    static func install() {
+        fd = crashLogURL.path.withCString { open($0, O_WRONLY | O_APPEND | O_CREAT, 0o644) }
+        guard fd >= 0 else { return }
+        frames = .allocate(capacity: Int(frameCapacity))
+        digits = .allocate(capacity: digitCapacity)
+
+        // Runs in a normal context, so formatting here is safe.
         NSSetUncaughtExceptionHandler { exception in
-            WatchCrashReporter.writeLine("== CRASH uncaught exception: \(exception.name.rawValue): \(exception.reason ?? "no reason")")
-            for frame in exception.callStackSymbols.prefix(24) {
-                WatchCrashReporter.writeLine("   \(frame)")
-            }
+            WatchCrashReporter.recordException(exception)
         }
 
-        // SIGTRAP covers Swift's own traps (force unwrap of nil, index out of range,
-        // arithmetic overflow) — the most likely candidates for an instant death.
+        // SIGTRAP covers Swift's own traps (nil unwrap, index out of range, overflow).
         for sig in [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP] {
-            signal(sig) { received in
-                WatchCrashReporter.writeLine("== CRASH signal \(received)")
-                WatchCrashReporter.writeBacktrace()
-                // Restore the default handler and re-raise, so the system still records
-                // the crash normally rather than us swallowing it.
-                signal(received, SIG_DFL)
-                raise(received)
-            }
+            signal(sig) { received in WatchCrashReporter.handleSignal(received) }
         }
     }
 
-    fileprivate static func writeLine(_ text: String) {
-        guard logFD >= 0 else { return }
-        var bytes = Array(text.utf8)
-        bytes.append(0x0A)
-        _ = bytes.withUnsafeBufferPointer { write(logFD, $0.baseAddress, $0.count) }
-        fsync(logFD)
+    /// The previous run's crash record, or nil if it ended cleanly. Clears the file by
+    /// truncating it in place — never replacing it — so the open descriptor stays valid.
+    static func takePreviousCrash() -> String? {
+        guard let data = try? Data(contentsOf: crashLogURL), !data.isEmpty else { return nil }
+        if fd >= 0 { ftruncate(fd, 0) }
+        return String(decoding: data, as: UTF8.self)
     }
 
-    /// `backtrace_symbols_fd` is the one backtrace call designed to run in a signal
-    /// handler: it writes straight to the descriptor without allocating.
-    fileprivate static func writeBacktrace() {
-        guard logFD >= 0 else { return }
-        var frames = [UnsafeMutableRawPointer?](repeating: nil, count: 32)
-        let count = backtrace(&frames, Int32(frames.count))
-        backtrace_symbols_fd(&frames, count, logFD)
-        fsync(logFD)
+    // MARK: - Failing path
+
+    fileprivate static func recordException(_ exception: NSException) {
+        guard fd >= 0 else { return }
+        var text = "== CRASH uncaught exception: \(exception.name.rawValue): \(exception.reason ?? "no reason")\n"
+        for frame in exception.callStackSymbols.prefix(30) {
+            text += "   \(frame)\n"
+        }
+        let bytes = Array(text.utf8)
+        bytes.withUnsafeBufferPointer { _ = write(fd, $0.baseAddress, $0.count) }
+        fsync(fd)
+    }
+
+    fileprivate static func handleSignal(_ sig: Int32) {
+        if fd >= 0 {
+            writeStatic("== CRASH signal ")
+            writeNumber(sig)
+            writeStatic("\n")
+            if let frames {
+                let count = backtrace(frames, frameCapacity)
+                backtrace_symbols_fd(frames, count, fd)
+            }
+            fsync(fd)
+        }
+        // Hand back to the default action so the system still records the crash.
+        signal(sig, SIG_DFL)
+        raise(sig)
+    }
+
+    private static func writeStatic(_ text: StaticString) {
+        _ = write(fd, text.utf8Start, text.utf8CodeUnitCount)
+    }
+
+    /// Integer to ASCII into the preallocated buffer — no String, no allocation.
+    private static func writeNumber(_ value: Int32) {
+        guard let digits else { return }
+        var remaining = value < 0 ? -Int(value) : Int(value)
+        var position = digitCapacity
+        repeat {
+            position -= 1
+            digits[position] = UInt8(48 + remaining % 10)
+            remaining /= 10
+        } while remaining > 0 && position > 0
+        _ = write(fd, digits + position, digitCapacity - position)
     }
 }

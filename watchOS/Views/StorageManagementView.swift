@@ -13,7 +13,7 @@ struct StorageManagementView: View {
                 VStack(spacing: 6) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(String(format: "%.0f MB", receiver.usedMB))
+                            Text(String(format: "%.0f MB", receiver.cachedUsedMB))
                                 .font(.system(size: 20, weight: .bold))
                                 .foregroundStyle(.white)
                             Text("used by YTWatch")
@@ -29,7 +29,7 @@ struct StorageManagementView: View {
                     // Storage bar
                     let total = receiver.totalDeviceStorageMB
                     let free = receiver.freeDeviceStorageMB
-                    let musicPct = total > 0 ? receiver.usedMB / total : 0
+                    let musicPct = total > 0 ? receiver.cachedUsedMB / total : 0
 
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {

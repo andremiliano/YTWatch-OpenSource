@@ -14,6 +14,12 @@ final class WatchDiagnostics: ObservableObject {
 
     /// Kept small: this lives on a memory-tight device and is only a recent history.
     private static let maxEntries = 1200
+    /// Trim well below the cap so the file is rewritten once per few hundred lines, not
+    /// on every line once full — each rewrite is ~100KB of main-thread I/O.
+    private static let trimTo = 900
+
+    /// Set at launch when the previous run crashed; sent once WatchConnectivity is up.
+    var crashReportPending = false
 
     @Published private(set) var lastExportSummary: String?
 
@@ -53,7 +59,7 @@ final class WatchDiagnostics: ObservableObject {
         }
 
         if entries.count > Self.maxEntries {
-            entries.removeFirst(entries.count - Self.maxEntries)
+            entries.removeFirst(entries.count - Self.trimTo)
             rewriteFile()
         }
     }
@@ -69,7 +75,7 @@ final class WatchDiagnostics: ObservableObject {
         let text = entries.isEmpty ? "" : entries.joined(separator: "\n") + "\n"
         try? text.write(to: logURL, atomically: true, encoding: .utf8)
         handle = try? FileHandle(forWritingTo: logURL)
-        try? handle?.seekToEnd()
+        _ = try? handle?.seekToEnd()
     }
 
     // MARK: - Export
@@ -104,6 +110,36 @@ final class WatchDiagnostics: ObservableObject {
         lines.append("--- events (oldest first, \(entries.count)) ---")
         lines.append(contentsOf: entries)
         return lines.joined(separator: "\n")
+    }
+
+    /// After a crash: send the event log as it stands, with nothing expensive. No directory
+    /// scans or storage figures (the full report does three walks of the audio folder), so
+    /// it can run the moment WatchConnectivity activates, before a repeat crash can stop it.
+    func sendCrashReportIfPending() {
+        guard crashReportPending,
+              WCSession.isSupported(), WCSession.default.activationState == .activated else { return }
+        crashReportPending = false
+        flush()
+
+        var lines = [
+            "YTWatch Watch diagnostics (automatic, after a crash)",
+            "Watch app version: \(AppVersion.display)",
+            "Exported: \(Self.formatter.string(from: Date()))",
+            "Last unexpected stop: \(CrashBreadcrumb.summary ?? "none recorded")",
+            "Unexpected stops recorded: \(CrashBreadcrumb.uncleanCount)",
+            "",
+            "--- events (oldest first, \(entries.count)) ---",
+        ]
+        lines.append(contentsOf: entries)
+
+        let url = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ytwatch-crash-report.txt")
+        guard (try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)) != nil else { return }
+        WCSession.default.transferFile(url, metadata: [
+            WatchMessageKey.type.rawValue: WatchMessageType.diagnostics.rawValue,
+            "watchVersion": AppVersion.display
+        ])
+        log("crash report queued for iPhone")
     }
 
     /// Write the report and hand it to WatchConnectivity. The transfer is queued by the

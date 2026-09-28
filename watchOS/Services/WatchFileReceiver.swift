@@ -45,6 +45,15 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // Activate first. Activation is asynchronous, and it is what lets a crash report
+        // leave the watch; started after the library work below, a crash anywhere in that
+        // work meant it never began, so the evidence could never be sent. Messages that
+        // arrive early are handled via Task { @MainActor }, which runs only after this init
+        // has finished, so they still see the loaded library.
+        if WCSession.isSupported() {
+            WCSession.default.delegate = self
+            WCSession.default.activate()
+        }
         createDirectories()
         loadPlaylistsFromDisk()
         // Merge any pre-existing duplicate playlists by title (one-time cleanup on launch)
@@ -58,151 +67,68 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             savePlaylistsToDisk()
         }
         refreshAvailable()
-        if WCSession.isSupported() {
-            WCSession.default.delegate = self
-            WCSession.default.activate()
-        }
         validateDownloadsOnLaunch()
     }
 
     // MARK: - Launch Validation & Self-Heal
 
-    /// On launch, verify every downloaded file is intact and playable. Corrupt/truncated
-    /// files are deleted and the phone is asked to re-send them. Runs in the background,
-    /// throttled, so it never blocks the UI. This keeps a bad file from crashing playback.
-    private static let validatedKey = "validatedTrackIds"
-    private static let validationVersionKey = "validationVersion"
-    /// Raise to force a re-check when the validation rules get stricter. The re-check is
-    /// spread across launches rather than done in one pass.
-    private static let validationVersion = 2
-    /// Set while a deep pass is running; a value still set at launch means the last pass
-    /// never finished, which is the signal to skip it rather than repeat it.
-    private static let validationInProgressKey = "validationInProgress"
-    /// Each deep check parses an audio file. A handful per launch covers the library over
-    /// normal use without ever making startup expensive.
-    private static let maxDeepChecksPerLaunch = 25
-
+    /// After launch, remove audio files too small to be real audio and ask the phone to
+    /// re-send them.
+    ///
+    /// Stat-only, deliberately. Builds 59–60 opened files with AVFoundation here to measure
+    /// their real length. That put hundreds of media parses into startup and coincided with
+    /// the app closing on every launch. Truncated files are instead caught as they're used:
+    /// playTrack rejects undersized files, the item's `.failed` status handles corrupt ones,
+    /// and a track that ends well short of its stated length requests a fresh copy.
+    ///
+    /// Enumerates the directory itself: `availableTrackIds()` already filters undersized
+    /// files out, so the previous size check (run over that list) could never find any.
     func validateDownloadsOnLaunch() {
         Task { @MainActor in
-            // Let the app finish launching and draw before touching hundreds of files.
+            // Let the app finish launching and draw first.
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-
             CrashBreadcrumb.mark(.validatingDownloads)
-            let ids = Array(availableTrackIds() ?? [])
-            guard !ids.isEmpty else {
-                WatchBreadcrumb.settled()
+            defer { WatchBreadcrumb.settled() }
+
+            // Never delete the file that is playing, whatever its size.
+            let playing = WatchPlayer.shared.currentTrack?.videoId
+            guard let scan = self.findUndersizedFiles(excluding: playing) else { return }
+            let undersized = scan.undersized
+            let checked = scan.checked
+
+            guard !undersized.isEmpty else {
+                WatchDiagnostics.shared.log("launch check: \(checked) files, none undersized")
                 return
             }
-
-            // If the previous run set this flag and never cleared it, validation did not
-            // finish — quite possibly because it was what killed the app. Skip the deep
-            // pass this launch instead of repeating whatever went wrong; the flag is
-            // cleared now, so the next launch tries again, one small batch at a time.
-            let previousRunDidNotFinish = UserDefaults.standard.bool(forKey: Self.validationInProgressKey)
-            UserDefaults.standard.set(false, forKey: Self.validationInProgressKey)
-            if previousRunDidNotFinish {
-                WatchDiagnostics.shared.log("skipping deep validation: previous attempt did not finish")
-            }
-
-            // How long each track is supposed to be, so a part-downloaded file can be told
-            // from a complete one.
-            var expectedDurations: [String: Int] = [:]
-            for playlist in playlists {
-                for track in playlist.tracks where track.durationSeconds > 0 {
-                    expectedDurations[track.videoId] = track.durationSeconds
-                }
-            }
-
-            // Files already passed by an older, weaker check are marked validated and would
-            // never be looked at again — including the truncated ones. Bumping the version
-            // re-checks everything once.
-            var validated = Set(UserDefaults.standard.stringArray(forKey: Self.validatedKey) ?? [])
-            if UserDefaults.standard.integer(forKey: Self.validationVersionKey) < Self.validationVersion {
-                WatchDiagnostics.shared.log("re-validating \(ids.count) files against expected durations")
-                validated = []
-                UserDefaults.standard.set(Self.validationVersion, forKey: Self.validationVersionKey)
-            }
-            var corrupt: [String] = []
-            var newlyValidated: [String] = []
-            var deepChecks = 0
-            let deepChecksAllowed = previousRunDidNotFinish ? 0 : Self.maxDeepChecksPerLaunch
-            if deepChecksAllowed > 0 {
-                UserDefaults.standard.set(true, forKey: Self.validationInProgressKey)
-            }
-
-            for (i, id) in ids.enumerated() {
-                if i % 5 == 4 { try? await Task.sleep(nanoseconds: 30_000_000) } // yield, never hitch UI
-                let url = Self.audioDirectory.appendingPathComponent("\(id).m4a")
-                // Fast check every launch: size catches truncated/interrupted downloads.
-                let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                if !AudioFileGate.isValid(sizeBytes: size) {
-                    corrupt.append(id)
-                    continue
-                }
-                // Deep playability check only once per file (cached), so later launches are
-                // cheap — and only a few per launch, because each one parses an audio file.
-                // Doing all of them at once was enough to get the app killed during startup,
-                // and with progress saved only at the end every relaunch started over.
-                if validated.contains(id) { continue }
-                guard deepChecks < deepChecksAllowed else { continue } // leave for a later launch
-                deepChecks += 1
-
-                guard let actual = await Self.playableDuration(url) else {
-                    corrupt.append(id)
-                    continue
-                }
-                if Self.isTruncated(actualSeconds: actual, expectedSeconds: expectedDurations[id] ?? 0) {
-                    WatchDiagnostics.shared.log("truncated: \(id) has \(WatchDiagnostics.seconds(actual)) of \(expectedDurations[id] ?? 0)s — re-downloading")
-                    corrupt.append(id)
-                } else {
-                    newlyValidated.append(id)
-                    // Persist as we go: progress must survive whatever ends this run.
-                    validated.insert(id)
-                    UserDefaults.standard.set(Array(validated), forKey: Self.validatedKey)
-                }
-            }
-
-            UserDefaults.standard.set(false, forKey: Self.validationInProgressKey)
-            if deepChecks > 0 {
-                WatchDiagnostics.shared.log("deep-checked \(deepChecks) files (\(ids.count - validated.count) still to do)")
-            }
-            if corrupt.isEmpty {
-                UserDefaults.standard.set(Array(validated), forKey: Self.validatedKey)
-                WatchDiagnostics.shared.log("launch validation: all \(ids.count) files OK")
-                WatchBreadcrumb.settled()
-                return
-            }
-
-            print("[Receiver] Launch validation: \(corrupt.count) corrupt/unplayable — deleting + requesting re-download")
-            for id in corrupt {
+            for id in undersized {
                 try? fm.removeItem(at: Self.audioDirectory.appendingPathComponent("\(id).m4a"))
-                validated.remove(id)
             }
-            UserDefaults.standard.set(Array(validated), forKey: Self.validatedKey)
-            _cachedTrackIds = nil
+            invalidateAvailabilityCache()
             refreshAvailable()
-            requestRedownload(videoIds: corrupt)
-            WatchDiagnostics.shared.log("launch validation: deleted \(corrupt.count) corrupt files")
-            WatchBreadcrumb.settled()
+            requestRedownload(videoIds: undersized)
+            WatchDiagnostics.shared.log("launch check: removed \(undersized.count) undersized files, re-download requested")
         }
     }
 
-    /// Validate that AVFoundation can actually play a file (catches non-truncated corruption).
-    nonisolated static func isPlayable(_ url: URL) async -> Bool {
-        await playableDuration(url) != nil
-    }
-
-    /// How much audio a file actually contains, or nil if it can't be played at all.
-    nonisolated static func playableDuration(_ url: URL) async -> Double? {
-        let asset = AVURLAsset(url: url)
-        do {
-            let playable = try await asset.load(.isPlayable)
-            let duration = try await asset.load(.duration)
-            guard playable, !duration.seconds.isNaN, duration.seconds > 0 else { return nil }
-            return duration.seconds
-        } catch {
-            return nil
+    /// Synchronous on purpose: a directory enumerator can't be iterated from an async
+    /// context under Swift 6.
+    private func findUndersizedFiles(excluding playing: String?) -> (undersized: [String], checked: Int)? {
+        guard let enumerator = fm.enumerator(
+            at: Self.audioDirectory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
+        ) else { return nil }
+        var undersized: [String] = []
+        var checked = 0
+        for case let url as URL in enumerator where url.pathExtension == "m4a" {
+            checked += 1
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+            let id = url.deletingPathExtension().lastPathComponent
+            if !AudioFileGate.isValid(sizeBytes: size), id != playing {
+                undersized.append(id)
+            }
         }
+        return (undersized, checked)
     }
 
     /// A part-downloaded file is still a valid, playable m4a — it just stops early. The
@@ -327,11 +253,22 @@ final class WatchFileReceiver: NSObject, ObservableObject {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
             entries.append((id: url.deletingPathExtension().lastPathComponent, sizeBytes: size))
         }
+        // This walk already has every file's size, so keep the total for the UI instead of
+        // walking the directory again on each redraw.
+        let total = entries.reduce(Int64(0)) { $0 + Int64($1.sizeBytes) }
+        if total != audioBytesOnDisk { audioBytesOnDisk = total }
+
         // Truncated/partially-written files are filtered here so they never enter the
         // shuffle/play queue — playTrack would reject them anyway, but only after
         // they're already selected, which chains into skip/crash loops.
         return AudioFileGate.filterValid(entries)
     }
+
+    /// Audio stored on the watch, as of the last directory scan. Views read this rather
+    /// than `usedMB`, which walks the whole directory: in a view body that ran on every
+    /// redraw — including twice a second while music plays, as currentTime publishes.
+    @Published private(set) var audioBytesOnDisk: Int64 = 0
+    var cachedUsedMB: Double { Double(audioBytesOnDisk) / 1_000_000 }
 
     // Filter playlists to only tracks actually on device
     var availablePlaylists: [Playlist] {
@@ -981,9 +918,13 @@ extension WatchFileReceiver: WCSessionDelegate {
 
     nonisolated func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {
         guard state == .activated else { return }
-        // init() runs before activation completes, so any recovery request made there is
-        // dropped; this is the first moment it can actually be sent.
-        Task { @MainActor in self.requestMissingMetadataIfNeeded() }
+        // init() runs before activation completes, so anything sent from there is dropped;
+        // this is the first moment it can actually go. The crash report goes first — it is
+        // the one thing that must get out before a repeat crash can stop it.
+        Task { @MainActor in
+            WatchDiagnostics.shared.sendCrashReportIfPending()
+            self.requestMissingMetadataIfNeeded()
+        }
     }
 
     // Receive audio or thumbnail file

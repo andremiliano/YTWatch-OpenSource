@@ -5,30 +5,38 @@ struct YTWatchWatchApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
-        // Before anything else: if a marker survived, the previous run died mid-activity.
+        // Genuinely first: everything below — library decode, directory scan, WCSession,
+        // audio-session setup, queue restore — is where a launch crash would come from, and
+        // a handler installed after them can't see it.
+        WatchCrashReporter.install()
+        let previousCrash = WatchCrashReporter.takePreviousCrash()
+
+        // If a marker survived, the previous run died mid-activity.
         let previous = CrashBreadcrumb.consumePrevious()
         // Stays set until the first view has been built, so a crash in the launch path
         // (library load, view construction) is reported as "launching" rather than as
         // whatever ran last. PlaylistListView's onAppear settles it.
         CrashBreadcrumb.mark(.launching)
-        _ = WatchFileReceiver.shared  // activate WCSession
-        WatchPlayer.shared.configureAudioSession()
 
-        // Install before anything else can fail, writing into the same log file.
-        WatchCrashReporter.install(logPath: WatchDiagnostics.shared.logURL.path)
+        // Record the evidence before doing anything else that could fail.
         WatchDiagnostics.shared.log("launch \(AppVersion.display)")
         if let previous {
             WatchDiagnostics.shared.log("PREVIOUS RUN ENDED UNEXPECTEDLY during: \(previous)")
-            // Send the evidence without the user having to remember — but NOT here.
-            // Building the report walks the whole audio directory three times (file list,
-            // total size, free space); doing that inside init(), before the first frame,
-            // meant that after one crash every launch carried that cost, which is its own
-            // way to never start. Off the launch path, once the app is up.
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
-                WatchDiagnostics.shared.sendToPhone(reason: "automatic after unexpected stop")
+        }
+        if let previousCrash {
+            for line in previousCrash.split(separator: "\n").prefix(60) {
+                WatchDiagnostics.shared.log(String(line))
             }
         }
+        if previous != nil || previousCrash != nil {
+            // Sent as soon as WatchConnectivity activates (see WatchFileReceiver), as a small
+            // raw log with no directory scans. Waiting a fixed delay missed every crash that
+            // happens within seconds of launch — which is exactly the one being chased.
+            WatchDiagnostics.shared.crashReportPending = true
+        }
+
+        _ = WatchFileReceiver.shared  // activate WCSession
+        WatchPlayer.shared.configureAudioSession()
     }
 
     var body: some Scene {

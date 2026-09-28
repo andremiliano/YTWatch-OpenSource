@@ -219,7 +219,7 @@ struct PlaylistListView: View {
                             // Navigation links
                             HStack(spacing: 8) {
                                 NavigationLink(destination: StorageManagementView()) {
-                                    StorageIndicator(usedMB: receiver.usedMB)
+                                    StorageIndicator(usedMB: receiver.cachedUsedMB)
                                 }
                                 .buttonStyle(.plain)
 

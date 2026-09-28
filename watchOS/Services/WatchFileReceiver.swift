@@ -14,6 +14,7 @@
 import Foundation
 import WatchConnectivity
 import AVFoundation
+import Darwin
 
 @MainActor
 final class WatchFileReceiver: NSObject, ObservableObject {
@@ -366,8 +367,12 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     private func handleDirectDownload(_ payload: DirectDownloadPayload) {
         let videoId = payload.track.videoId
 
-        // Skip if already have this track
-        guard audioURL(for: videoId) == nil else {
+        // Only acknowledge an existing file if it passes the same size gate as the
+        // playback queue. A partial file must be replaced by this download.
+        let existingSize = audioURL(for: videoId).flatMap {
+            (try? $0.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        } ?? 0
+        guard !AudioFileGate.isValid(sizeBytes: existingSize) else {
             sendDownloadResult(videoId: videoId, success: true)
             upsertTrackIntoPlaylistDeferred(payload)
             scheduleLibraryFlush()
@@ -409,25 +414,20 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                 let (tempURL, response) = try await URLSession.shared.download(for: request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 let size = (try? tempURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                guard (200...299).contains(status), size > 0 else {
+                guard (200...299).contains(status), AudioFileGate.isValid(sizeBytes: size) else {
                     try? fm.removeItem(at: tempURL)
                     throw URLError(.badServerResponse)
                 }
 
                 let destURL = Self.audioDirectory.appendingPathComponent("\(videoId).m4a")
-                try? fm.removeItem(at: destURL)
-                try fm.moveItem(at: tempURL, to: destURL)
+                try Self.installFile(from: tempURL, at: destURL)
+                try? fm.removeItem(at: tempURL)
 
                 // Register the track NOW, with no suspension point between the file landing
                 // and its metadata. It used to happen after the thumbnail await below, so a
                 // suspend/kill during that fetch left an audio file no playlist knew about —
                 // which then surfaced as a raw-videoId entry in "Unsorted".
-                if AudioFileGate.isValid(sizeBytes: size) {
-                    markFileAvailable(videoId: videoId)
-                } else {
-                    // Too small to be real audio: don't let the cache advertise it.
-                    invalidateAvailabilityCache()
-                }
+                markFileAvailable(videoId: videoId)
                 upsertTrackIntoPlaylistDeferred(payload)
                 scheduleLibraryFlush()
 
@@ -437,8 +437,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
                     if let (thumbTemp, thumbResp) = try? await URLSession.shared.download(from: thumbURL),
                        (thumbResp as? HTTPURLResponse).map({ (200...299).contains($0.statusCode) }) ?? true {
                         let thumbDest = Self.thumbnailDirectory.appendingPathComponent("\(videoId).jpg")
-                        try? fm.removeItem(at: thumbDest)
-                        try? fm.moveItem(at: thumbTemp, to: thumbDest)
+                        try? Self.installFile(from: thumbTemp, at: thumbDest)
+                        try? fm.removeItem(at: thumbTemp)
                     }
                 }
 
@@ -449,9 +449,8 @@ final class WatchFileReceiver: NSObject, ObservableObject {
 
             } catch {
                 print("[Receiver] WiFi download ✘ \(videoId): \(error.localizedDescription)")
-                // The destination is removed before the move, so a failed move leaves no
-                // file where the cache may still claim one exists. Re-derive availability
-                // from disk, or the queue keeps selecting a track that isn't there.
+                // Re-derive availability after a failed transfer; a previous valid
+                // download remains intact because installation is atomic.
                 self.invalidateAvailabilityCache()
                 self.syncCachedAvailablePlaylistsFromMemory()
                 sendDownloadResult(videoId: videoId, success: false)
@@ -667,6 +666,21 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     private func createDirectories() {
         try? fm.createDirectory(at: Self.audioDirectory, withIntermediateDirectories: true)
         try? fm.createDirectory(at: Self.thumbnailDirectory, withIntermediateDirectories: true)
+    }
+
+    /// Stage in the destination directory, then atomically replace the old file. A
+    /// failed or interrupted transfer must not remove a playable existing download.
+    private nonisolated static func installFile(from source: URL, at destination: URL) throws {
+        let staged = destination.deletingLastPathComponent()
+            .appendingPathComponent(".incoming-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: staged) }
+        try FileManager.default.copyItem(at: source, to: staged)
+        let status = staged.path.withCString { from in
+            destination.path.withCString { to in rename(from, to) }
+        }
+        guard status == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     private func loadPlaylistsFromDisk() {
@@ -944,9 +958,8 @@ extension WatchFileReceiver: WCSessionDelegate {
 
         if isThumbnail {
             let thumbDest = docs.appendingPathComponent("Thumbnails", isDirectory: true).appendingPathComponent("\(transfer.track.videoId).jpg")
-            try? fm.removeItem(at: thumbDest)
             do {
-                try fm.copyItem(at: fileURL, to: thumbDest)
+                try Self.installFile(from: fileURL, at: thumbDest)
                 wroteSuccessfully = true
             } catch {
                 print("[Receiver] BT write failed for thumbnail \(transfer.track.videoId): \(error.localizedDescription)")
@@ -954,12 +967,13 @@ extension WatchFileReceiver: WCSessionDelegate {
             }
         } else {
             let destURL = docs.appendingPathComponent("Audio", isDirectory: true).appendingPathComponent("\(transfer.track.videoId).m4a")
-            try? fm.removeItem(at: destURL)
             do {
-                try fm.copyItem(at: fileURL, to: destURL)
-                // Verify file is non-empty
-                let size = (try? destURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                wroteSuccessfully = AudioFileGate.isValid(sizeBytes: size)
+                let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                guard AudioFileGate.isValid(sizeBytes: size) else {
+                    throw URLError(.badServerResponse)
+                }
+                try Self.installFile(from: fileURL, at: destURL)
+                wroteSuccessfully = true
             } catch {
                 print("[Receiver] BT write failed for \(transfer.track.videoId): \(error.localizedDescription)")
                 wroteSuccessfully = false
@@ -996,8 +1010,6 @@ extension WatchFileReceiver: WCSessionDelegate {
             self.sendDownloadResult(videoId: transfer.track.videoId, success: wroteSuccessfully)
 
             guard wroteSuccessfully else {
-                // The old copy was removed before the failed write — same stale-cache
-                // hazard as a failed WiFi download.
                 self.invalidateAvailabilityCache()
                 return
             }

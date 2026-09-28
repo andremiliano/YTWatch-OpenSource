@@ -69,18 +69,18 @@ public struct PlaybackQueue: Equatable, Sendable {
         using rng: inout some RandomNumberGenerator
     ) -> AdvanceResult {
         guard !order.isEmpty else { return .empty }
+        let available = Set(availableIndices.filter { $0 >= 0 })
+        guard !available.isEmpty else { return .empty }
 
         if forward {
-            let next = position + 1
-            if next < order.count {
+            if let next = ((position + 1)..<order.count).first(where: { available.contains(order[$0]) }) {
                 position = next
             } else if repeatAll {
                 let restart: Int
                 if isShuffled {
-                    let avail = availableIndices.filter { $0 >= 0 }
-                    restart = avail.randomElement(using: &rng) ?? order[0]
+                    restart = available.randomElement(using: &rng) ?? order[0]
                 } else {
-                    restart = order.first ?? 0
+                    restart = available.min() ?? order[0]
                 }
                 build(availableIndices: availableIndices, startAt: restart, shuffled: isShuffled, using: &rng)
                 guard !order.isEmpty else { return .empty }
@@ -88,11 +88,11 @@ public struct PlaybackQueue: Equatable, Sendable {
                 return .endReached
             }
         } else {
-            let prev = position - 1
-            if prev >= 0 {
+            if let prev = order.indices.reversed().first(where: { $0 < position && available.contains(order[$0]) }) {
                 position = prev
             } else if repeatAll {
-                position = order.count - 1
+                guard let last = order.indices.reversed().first(where: { available.contains(order[$0]) }) else { return .empty }
+                position = last
             } else {
                 return .atStart
             }

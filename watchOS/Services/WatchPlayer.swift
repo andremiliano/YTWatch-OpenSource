@@ -212,6 +212,13 @@ final class WatchPlayer: ObservableObject {
             try? await Task.sleep(nanoseconds: Self.activationTimeoutSeconds * 1_000_000_000)
             guard !Task.isCancelled, let self else { return }
             guard self.playbackGeneration == generation, !self.sessionActivated else { return }
+            if !self.isPlaying {
+                // A pause during activation is intentional. Invalidate the delayed
+                // activation callback so it cannot install an item after this timeout.
+                self.playbackGeneration += 1
+                self.tearDownPlayer()
+                return
+            }
             WatchDiagnostics.shared.log("audio session activation timed out — skipping track")
             self.activationRetryCount = 0
             self.tearDownPlayer()
@@ -316,6 +323,13 @@ final class WatchPlayer: ObservableObject {
     func play() {
         routeLossPauseDate = nil
         playbackWatchdog.userTookControl()
+        if activationTimeout != nil {
+            // A previous item's AVPlayerItem can still be installed during a handoff.
+            // Let the pending activation complete instead of replaying that old item.
+            isPlaying = true
+            updateNowPlaying()
+            return
+        }
         // A finished item is still loaded, parked at its end, so "play" on it would be
         // silent — move on to the next track instead.
         if player?.currentItem != nil, finishedGeneration == playbackGeneration {
@@ -330,7 +344,12 @@ final class WatchPlayer: ObservableObject {
                 if duration <= 0 { duration = knownTrackDuration }
                 stallDetector.reset()
                 playbackGeneration += 1
+                isPlaying = true
                 activateSessionAndPlay(url: url, generation: playbackGeneration)
+            } else if currentPlaylist != nil {
+                // A download can disappear while the app is paused or syncing. A play
+                // tap must never silently do nothing on that stale queue entry.
+                advanceQueue(forward: true, reason: "play pressed on missing file")
             }
             return
         }
@@ -528,6 +547,11 @@ final class WatchPlayer: ObservableObject {
         guard let playlist = currentPlaylist,
               index >= 0, index < playlist.tracks.count else { return }
 
+        // Invalidate pending failure/finish callbacks before checking the file. Even a
+        // missing file is a new selection: otherwise its queued auto-skip can run after
+        // a user presses Next and advance a second time.
+        playbackGeneration += 1
+        let gen = playbackGeneration
         let track = playlist.tracks[index]
         guard let url = WatchFileReceiver.shared.audioURL(for: track.videoId) else {
             // The queue only offers tracks the availability cache says are on disk, so
@@ -557,8 +581,6 @@ final class WatchPlayer: ObservableObject {
         removeItemObservers()
         stopStallTimer()
 
-        playbackGeneration += 1
-        let gen = playbackGeneration
         playbackWatchdog.trackStarted()
         endOfItemDetector.reset()
         WatchDiagnostics.shared.log("play #\(index) \"\(track.title.prefix(30))\" (\(track.durationSeconds)s) \(WatchDiagnostics.memoryNote)")
@@ -566,6 +588,7 @@ final class WatchPlayer: ObservableObject {
         CrashBreadcrumb.mark(.startingTrack(track.title))
         currentIndex = index
         currentTrack = track
+        isPlaying = true
         error = nil
         knownTrackDuration = track.durationSeconds > 0 ? Double(track.durationSeconds) : 0
         duration = knownTrackDuration
@@ -765,8 +788,8 @@ final class WatchPlayer: ObservableObject {
         // it may not, if the app was suspended during a silent handoff.
         avPlayer.replaceCurrentItem(with: item)
         avPlayer.volume = currentVolume
-        avPlayer.play()
-        isPlaying = true
+        // The user may have paused while session activation or item setup was pending.
+        if isPlaying { avPlayer.play() } else { avPlayer.pause() }
         startStallTimer()
         WatchDiagnostics.shared.log("  item installed, play requested")
     }

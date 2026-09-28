@@ -156,6 +156,21 @@ final class PlaybackQueueTests: XCTestCase {
         XCTAssertEqual(q.currentIndex, 0)   // stays put
     }
 
+    func testNextSkipsTracksRemovedSinceQueueWasBuilt() {
+        var q = PlaybackQueue()
+        var r = rng()
+        q.build(availableIndices: [0, 1, 2, 3], startAt: 0, shuffled: false, using: &r)
+        XCTAssertEqual(q.advance(forward: true, repeatAll: false, availableIndices: [0, 3], using: &r), .play(3))
+        XCTAssertEqual(q.advance(forward: true, repeatAll: false, availableIndices: [0, 3], using: &r), .endReached)
+    }
+
+    func testPreviousSkipsTracksRemovedSinceQueueWasBuilt() {
+        var q = PlaybackQueue()
+        var r = rng()
+        q.build(availableIndices: [0, 1, 2, 3], startAt: 3, shuffled: false, using: &r)
+        XCTAssertEqual(q.advance(forward: false, repeatAll: false, availableIndices: [0, 3], using: &r), .play(0))
+    }
+
     // MARK: - Queue editing
 
     func testRemoveFromUpNext() {

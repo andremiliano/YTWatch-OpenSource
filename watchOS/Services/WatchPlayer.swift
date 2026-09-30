@@ -171,7 +171,9 @@ final class WatchPlayer: ObservableObject {
         startActivationTimeout(generation: generation)
         WatchDiagnostics.shared.log("  activating audio session")
         let session = AVAudioSession.sharedInstance()
-        session.activate(options: []) { [weak self] success, activationError in
+        // This legacy API calls back off the main actor. Without @Sendable, Swift 6
+        // inherits this method's actor and traps before the Task can dispatch to it.
+        session.activate(options: []) { @Sendable [weak self] success, activationError in
             Task { @MainActor in
                 guard let self, self.playbackGeneration == generation else { return }
                 guard success else {
@@ -198,7 +200,13 @@ final class WatchPlayer: ObservableObject {
                 self.activationRetryCount = 0
                 self.sessionActivated = true
                 WatchDiagnostics.shared.log("  audio session active")
-                self.beginPlayback(url: url, generation: generation)
+                if let item = self.playerItem, self.player?.currentItem === item {
+                    self.cancelActivationTimeout()
+                    if self.isPlaying { self.player?.play() }
+                    self.updateNowPlaying()
+                } else {
+                    self.beginPlayback(url: url, generation: generation)
+                }
             }
         }
     }
@@ -212,19 +220,18 @@ final class WatchPlayer: ObservableObject {
             try? await Task.sleep(nanoseconds: Self.activationTimeoutSeconds * 1_000_000_000)
             guard !Task.isCancelled, let self else { return }
             guard self.playbackGeneration == generation, !self.sessionActivated else { return }
+            self.cancelActivationTimeout()
+            self.playbackGeneration += 1 // invalidate any late activation callback
             if !self.isPlaying {
                 // A pause during activation is intentional. Invalidate the delayed
                 // activation callback so it cannot install an item after this timeout.
-                self.playbackGeneration += 1
                 self.tearDownPlayer()
                 return
             }
-            WatchDiagnostics.shared.log("audio session activation timed out — skipping track")
+            WatchDiagnostics.shared.log("audio session activation timed out")
             self.activationRetryCount = 0
-            self.tearDownPlayer()
-            self.isPlaying = false
-            let track = self.currentTrack ?? Track(id: "", videoId: "", title: "?", artist: "", durationSeconds: 0)
-            self.handleUnplayable(track: track, reason: "audio session never activated")
+            self.error = "Connect your headphones and tap Play."
+            self.stopPlayback()
         }
     }
 
@@ -336,6 +343,12 @@ final class WatchPlayer: ObservableObject {
             advanceQueue(forward: true, reason: "play pressed on a finished track")
             return
         }
+        if !sessionActivated, let track = currentTrack,
+           let url = WatchFileReceiver.shared.audioURL(for: track.videoId) {
+            isPlaying = true
+            activateSessionAndPlay(url: url, generation: playbackGeneration)
+            return
+        }
         guard player?.currentItem != nil else {
             // No item loaded — (re)load the current track
             if let track = currentTrack,
@@ -358,8 +371,11 @@ final class WatchPlayer: ObservableObject {
         updateNowPlaying()
     }
 
-    func pause() {
-        routeLossPauseDate = nil
+    func pause(clearRouteLoss: Bool = true) {
+        if clearRouteLoss {
+            routeLossPauseDate = nil
+            wasPlayingBeforeInterruption = false
+        }
         playbackWatchdog.userTookControl()
         player?.pause()
         isPlaying = false
@@ -580,6 +596,7 @@ final class WatchPlayer: ObservableObject {
         // play() in the same turn, so the player never goes idle across the handoff.
         removeItemObservers()
         stopStallTimer()
+        playerItem = nil // the old item may keep playing during this handoff
 
         playbackWatchdog.trackStarted()
         endOfItemDetector.reset()
@@ -675,9 +692,12 @@ final class WatchPlayer: ObservableObject {
         p.actionAtItemEnd = .pause
         player = p
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            let seconds = time.seconds
-            Task { @MainActor in self?.handleTimeTick(seconds) }
+        timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { @Sendable [weak self] _ in
+            Task { @MainActor in
+                guard let self, let live = self.player, let item = live.currentItem,
+                      item === self.playerItem else { return }
+                self.handleTimeTick(live.currentTime().seconds)
+            }
         }
         return p
     }
@@ -700,11 +720,20 @@ final class WatchPlayer: ObservableObject {
         let avPlayer = ensurePlayer()
         removeItemObservers()
 
-        // No precise-timing key — that forces a full-file parse per track (memory/CPU).
-        // We rely on metadata `knownTrackDuration` for end detection instead.
         WatchDiagnostics.shared.log("  creating player item")
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
+        // Some downloaded AAC files report twice their audio length through AVAsset.
+        // AVAudioFile reads the actual frame count without decoding the song. Set the
+        // native end time before playback so even a moving clock cannot play the tail.
+        if let audio = try? AVAudioFile(forReading: url) {
+            let seconds = Double(audio.length) / audio.processingFormat.sampleRate
+            if seconds.isFinite, seconds > 0 {
+                item.forwardPlaybackEndTime = CMTime(seconds: seconds, preferredTimescale: 44_100)
+                duration = seconds
+                WatchDiagnostics.shared.log("  audio length \(WatchDiagnostics.seconds(seconds))")
+            }
+        }
         playerItem = item
 
         let capturedGen = generation
@@ -725,14 +754,13 @@ final class WatchPlayer: ObservableObject {
             let reason = (note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)?.localizedDescription
             Task { @MainActor in self?.handleItemFailedMidPlayback(generation: capturedGen, error: reason) }
         }
-        statusObservation = item.observe(\.status, options: [.new, .initial]) { [weak self] observedItem, _ in
+        statusObservation = item.observe(\.status, options: [.new, .initial]) { @Sendable [weak self] observedItem, _ in
             let status = observedItem.status
             let dur = observedItem.duration.seconds
             let errMsg = observedItem.error?.localizedDescription
             Task { @MainActor [weak self] in
                 guard let self,
-                      self.playbackGeneration == capturedGen,
-                      self.playerItem === observedItem else { return }
+                      self.playbackGeneration == capturedGen else { return }
                 switch status {
                 case .readyToPlay:
                     WatchDiagnostics.shared.log("  item ready (asset \(dur.isNaN ? -1 : dur.rounded())s)")
@@ -748,10 +776,15 @@ final class WatchPlayer: ObservableObject {
                     // duration BEFORE publishing Now Playing, otherwise the lock screen
                     // gets a 0-duration entry with a dead scrubber for those tracks.
                     // Persisting is deferred, so this stays cheap.
-                    if self.knownTrackDuration <= 0, !dur.isNaN, dur > 0 {
-                        self.duration = dur
-                        if let vid = self.currentTrack?.videoId, dur.isFinite, dur < 100_000 {
-                            WatchFileReceiver.shared.updateTrackDuration(videoId: vid, duration: Int(dur.rounded()))
+                    if self.knownTrackDuration <= 0 {
+                        let actual = EndOfItemDetector.effectiveEndTime(
+                            itemDuration: dur, playbackEndTime: self.playerItem?.forwardPlaybackEndTime.seconds
+                        )
+                        if let actual {
+                            self.duration = actual
+                            if let vid = self.currentTrack?.videoId, actual < 100_000 {
+                                WatchFileReceiver.shared.updateTrackDuration(videoId: vid, duration: Int(actual.rounded()))
+                            }
                         }
                     }
                     self.updateNowPlaying()
@@ -788,6 +821,9 @@ final class WatchPlayer: ObservableObject {
         // it may not, if the app was suspended during a silent handoff.
         avPlayer.replaceCurrentItem(with: item)
         avPlayer.volume = currentVolume
+        if currentTime.isFinite, currentTime > 0 {
+            avPlayer.seek(to: CMTime(seconds: min(currentTime, duration), preferredTimescale: 44_100))
+        }
         // The user may have paused while session activation or item setup was pending.
         if isPlaying { avPlayer.play() } else { avPlayer.pause() }
         startStallTimer()
@@ -812,9 +848,13 @@ final class WatchPlayer: ObservableObject {
                 // ending, skipping the track that just started.
                 let liveItem = player.currentItem
                 let sameItem = liveItem != nil && liveItem === self.playerItem
+                let endTime = sameItem ? EndOfItemDetector.effectiveEndTime(
+                    itemDuration: liveItem?.duration.seconds,
+                    playbackEndTime: liveItem?.forwardPlaybackEndTime.seconds
+                ) : nil
                 if self.endOfItemDetector.tick(
                     time: t,
-                    itemDuration: sameItem ? liveItem?.duration.seconds : nil,
+                    itemDuration: endTime,
                     rate: player.rate,
                     intendsToPlay: self.isPlaying
                 ) {
@@ -833,7 +873,7 @@ final class WatchPlayer: ObservableObject {
                 let outcome = self.stallDetector.tick(
                     time: t,
                     metadataDuration: self.duration,
-                    assetDuration: self.playerItem?.duration.seconds
+                    assetDuration: endTime
                 )
                 if outcome == .stalled {
                     WatchDiagnostics.shared.log("stall detected at \(String(format: "%.1f", t))s of \(String(format: "%.1f", self.duration))s")
@@ -900,7 +940,9 @@ final class WatchPlayer: ObservableObject {
         if timeObserverTick % 60 == 0 {
             WatchDiagnostics.shared.log("playing \(WatchDiagnostics.seconds(t))/\(WatchDiagnostics.seconds(duration)) \(WatchDiagnostics.memoryNote)")
         }
-        if needsNowPlayingUpdate || timeObserverTick % 2 == 0 {
+        // Now Playing extrapolates elapsed time from playback rate. Publish only when
+        // duration changes; play/pause/seek and track changes already publish explicitly.
+        if needsNowPlayingUpdate {
             updateNowPlaying()
         }
         if timeObserverTick % 20 == 0 { saveLastPlayed() }
@@ -929,6 +971,7 @@ final class WatchPlayer: ObservableObject {
             return
         }
         finishedGeneration = generation
+        guard isPlaying else { return } // a late end signal must not undo a user pause
         WatchDiagnostics.shared.log("track finished at \(WatchDiagnostics.seconds(currentTime)) of \(WatchDiagnostics.seconds(duration)) stated")
 
         // A file that runs out well before the track's stated length is a part-finished
@@ -1006,7 +1049,7 @@ final class WatchPlayer: ObservableObject {
 
     // MARK: - Now Playing + Remote Controls
 
-    private var cachedArtwork: (videoId: String, artwork: MPMediaItemArtwork)?
+    private var cachedArtwork: (videoId: String, artwork: MPMediaItemArtwork?)?
 
     private func updateNowPlaying() {
         let center = MPNowPlayingInfoCenter.default()
@@ -1036,10 +1079,14 @@ final class WatchPlayer: ObservableObject {
         if let cached = cachedArtwork, cached.videoId == track.videoId {
             return cached.artwork
         }
+        // Cache a miss as well: no thumbnail should cost one disk lookup per song,
+        // rather than another ImageIO attempt and diagnostic write every second.
+        cachedArtwork = (track.videoId, nil)
         WatchDiagnostics.shared.log("  decoding artwork")
         guard let url = WatchFileReceiver.shared.thumbnailURL(for: track.videoId),
               let image = Self.downsampledImage(at: url, maxPixel: 300) else { return nil }
-        let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+        // MediaPlayer invokes this on its access queue, including during activation.
+        let artwork = MPMediaItemArtwork(boundsSize: image.size) { @Sendable _ in image }
         cachedArtwork = (track.videoId, artwork)
         return artwork
     }
@@ -1062,29 +1109,30 @@ final class WatchPlayer: ObservableObject {
     private func setupRemoteControls() {
         let center = MPRemoteCommandCenter.shared()
 
-        center.playCommand.addTarget { [weak self] _ in
+        center.playCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor in self?.play() }
             return .success
         }
-        center.pauseCommand.addTarget { [weak self] _ in
+        center.pauseCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor in self?.pause() }
             return .success
         }
-        center.togglePlayPauseCommand.addTarget { [weak self] _ in
+        center.togglePlayPauseCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor in self?.togglePlayPause() }
             return .success
         }
-        center.nextTrackCommand.addTarget { [weak self] _ in
+        center.nextTrackCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor in self?.next() }
             return .success
         }
-        center.previousTrackCommand.addTarget { [weak self] _ in
+        center.previousTrackCommand.addTarget { @Sendable [weak self] _ in
             Task { @MainActor in self?.previous() }
             return .success
         }
-        center.changePlaybackPositionCommand.addTarget { [weak self] event in
+        center.changePlaybackPositionCommand.addTarget { @Sendable [weak self] event in
             guard let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            Task { @MainActor in self?.seek(to: e.positionTime) }
+            let position = e.positionTime
+            Task { @MainActor in self?.seek(to: position) }
             return .success
         }
     }
@@ -1100,27 +1148,30 @@ final class WatchPlayer: ObservableObject {
         )
     }
 
-    @objc private func handleInterruption(_ notification: Notification) {
+    @objc private nonisolated func handleInterruption(_ notification: Notification) {
         guard let info = notification.userInfo,
               let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
+        let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt
         Task { @MainActor in
             switch type {
             case .began:
                 WatchDiagnostics.shared.log("audio interrupted (was playing: \(self.isPlaying))")
-                self.wasPlayingBeforeInterruption = self.isPlaying
+                self.wasPlayingBeforeInterruption = self.isPlaying || self.routeLossPauseDate != nil
                 self.sessionActivated = false
-                self.pause()
+                self.pause(clearRouteLoss: false)
             case .ended:
-                if let optionsValue = info[AVAudioSessionInterruptionOptionKey] as? UInt {
+                if let optionsValue {
                     let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                     if options.contains(.shouldResume) && self.wasPlayingBeforeInterruption {
                         let gen = self.playbackGeneration
-                        AVAudioSession.sharedInstance().activate(options: []) { [weak self] success, _ in
+                        AVAudioSession.sharedInstance().activate(options: []) { @Sendable [weak self] success, _ in
                             guard success else { return }
                             Task { @MainActor in
-                                guard let self, self.playbackGeneration == gen else { return }
+                                guard let self, self.playbackGeneration == gen,
+                                      self.wasPlayingBeforeInterruption else { return }
+                                self.sessionActivated = true
                                 self.play()
                             }
                         }
@@ -1143,7 +1194,7 @@ final class WatchPlayer: ObservableObject {
         )
     }
 
-    @objc private func handleRouteChange(_ notification: Notification) {
+    @objc private nonisolated func handleRouteChange(_ notification: Notification) {
         guard let info = notification.userInfo,
               let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else { return }
@@ -1164,12 +1215,14 @@ final class WatchPlayer: ObservableObject {
             case .newDeviceAvailable:
                 guard let lost = self.routeLossPauseDate,
                       Date().timeIntervalSince(lost) < Self.routeResumeWindow else { return }
-                self.routeLossPauseDate = nil
                 WatchDiagnostics.shared.log("audio route back — resuming")
                 // Re-activate first: the session may have been torn down with the route.
-                AVAudioSession.sharedInstance().activate(options: []) { success, _ in
+                let gen = self.playbackGeneration
+                AVAudioSession.sharedInstance().activate(options: []) { @Sendable [weak self] success, _ in
                     Task { @MainActor in
-                        if success { self.sessionActivated = true }
+                        guard let self, success, self.playbackGeneration == gen,
+                              self.routeLossPauseDate == lost else { return }
+                        self.sessionActivated = true
                         self.play()
                     }
                 }

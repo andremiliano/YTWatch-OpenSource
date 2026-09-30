@@ -13,6 +13,12 @@ import Foundation
 /// against an already-resolved shorter duration reads as "ended"). Requiring consecutive
 /// agreeing samples removes that race, matching the sibling detectors in this module.
 struct EndOfItemDetector: Equatable {
+    /// The configured audio endpoint can be earlier than a malformed container's end.
+    static func effectiveEndTime(itemDuration: Double?, playbackEndTime: Double?) -> Double? {
+        [itemDuration, playbackEndTime].compactMap { $0 }
+            .filter { $0.isFinite && $0 > 0 }.min()
+    }
+
     /// How close to the end still counts as "at the end".
     static let endTolerance: Double = 0.35
     /// Consecutive confirming samples required before reporting an ending.
@@ -29,8 +35,8 @@ struct EndOfItemDetector: Equatable {
     ///   - time: `player.currentTime().seconds`
     ///   - itemDuration: duration of the item the clock was read from — pass nil when the
     ///     player's current item isn't the one being tracked, so a swap can't be misread.
-    ///     The *container's* duration: metadata duration can under-report and would cut
-    ///     tracks short.
+    ///     Use the container duration capped by the configured audio endpoint;
+    ///     track metadata alone can under-report and would cut tracks short.
     ///   - rate: `player.rate` — a player parked at the end has stopped.
     ///   - intendsToPlay: the app's own intent, so user pauses never look like an ending.
     /// - Returns: true once enough consecutive samples agree the item has ended.

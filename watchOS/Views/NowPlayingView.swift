@@ -40,26 +40,28 @@ struct NowPlayingScreen: View {
             .font(.system(size: 10, design: .monospaced))
             .foregroundStyle(.secondary)
 
-            HStack(spacing: 18) {
+            HStack(spacing: 6) {
                 Button { player.previous() } label: {
                     Image(systemName: "backward.end.fill")
+                        .frame(width: 44, height: 44)
                 }
                 .accessibilityLabel("Previous track")
 
                 Button { player.togglePlayPause() } label: {
                     Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
                         .font(.title3)
+                        .frame(width: 44, height: 44)
                 }
                 .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
                 Button { player.next() } label: {
                     Image(systemName: "forward.end.fill")
+                        .frame(width: 44, height: 44)
                 }
                 .accessibilityLabel("Next track")
             }
             .buttonStyle(.plain)
             .font(.title3)
-            .padding(.vertical, 8)
 
             NavigationLink(destination: WatchKit.NowPlayingView()) {
                 Text("System controls")

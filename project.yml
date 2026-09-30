@@ -23,7 +23,7 @@ settings:
     # CURRENT_PROJECT_VERSION on the command line, and App Store Connect rejects any
     # build number it has already seen, so bump this here whenever a build ships.
     MARKETING_VERSION: "1.3.3"
-    CURRENT_PROJECT_VERSION: "63"
+    CURRENT_PROJECT_VERSION: "64"
   configs:
     Debug:
       ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT: YES

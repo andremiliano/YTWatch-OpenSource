@@ -2,6 +2,14 @@ import XCTest
 @testable import PlaybackCore
 
 final class EndOfItemDetectorTests: XCTestCase {
+    func testDoubledAACContainerUsesActualAudioEnd() {
+        let end = EndOfItemDetector.effectiveEndTime(itemDuration: 438.529, playbackEndTime: 219.265)
+        XCTAssertEqual(end, 219.265)
+        XCTAssertEqual(ticksUntilFire(time: 219.265, duration: end), EndOfItemDetector.confirmationsRequired)
+        XCTAssertEqual(EndOfItemDetector.effectiveEndTime(itemDuration: 180, playbackEndTime: .nan), 180)
+        XCTAssertEqual(EndOfItemDetector.effectiveEndTime(itemDuration: 180, playbackEndTime: 200), 180)
+        XCTAssertNil(EndOfItemDetector.effectiveEndTime(itemDuration: .infinity, playbackEndTime: .nan))
+    }
 
     private func looksParked(time: Double, duration: Double?, rate: Float = 0, playing: Bool = true) -> Bool {
         EndOfItemDetector.looksParked(time: time, itemDuration: duration, rate: rate, intendsToPlay: playing)

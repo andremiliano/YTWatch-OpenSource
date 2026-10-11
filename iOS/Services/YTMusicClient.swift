@@ -186,71 +186,33 @@ final class YTMusicClient: NSObject, ObservableObject {
         var tracks: [Track]
     }
 
+    // ytmusicapi's filter params. Since 2026 an unfiltered search returns itemSectionRenderer
+    // blocks the parser can't read; filtered searches still return one ordered musicShelfRenderer.
+    private static let songsFilter = "EgWKAQIIAWoMEA4QChADEAQQCRAF"
+    private static let albumsFilter = "EgWKAQIYAWoMEA4QChADEAQQCRAF"
+
     func search(query: String) async throws -> SearchResults {
-        let data = try await ytmRequest(endpoint: "search", body: ["query": query])
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return SearchResults()
-        }
+        async let songsData = ytmRequest(endpoint: "search", body: ["query": query, "params": Self.songsFilter])
+        async let albumsData = ytmRequest(endpoint: "search", body: ["query": query, "params": Self.albumsFilter])
+        let songItems = Self.searchShelfItems(try await songsData)
+        let albumItems = Self.searchShelfItems((try? await albumsData) ?? Data())
 
-        var songs: [Track] = []
-        var albums: [Playlist] = []
-        var seenSongs = Set<String>()
-        var seenAlbums = Set<String>()
-
-        var stack: [Any] = [json]
-        while let obj = stack.popLast() {
-            if let dict = obj as? [String: Any] {
-                if let shelf = dict["musicShelfRenderer"] as? [String: Any] {
-                    let shelfTitle = ((shelf["title"] as? [String: Any])?["runs"] as? [[String: Any]])?
-                        .first?["text"] as? String ?? ""
-                    let contents = shelf["contents"] as? [Any] ?? []
-                    let isAlbumShelf = shelfTitle.lowercased().contains("album") || shelfTitle.lowercased().contains("single")
-
-                    for item in contents {
-                        let itemDict = item as? [String: Any]
-                        if isAlbumShelf {
-                            // Albums via musicTwoRowItemRenderer
-                            if let r = itemDict?["musicTwoRowItemRenderer"] as? [String: Any],
-                               let p = parsePlaylistRenderer(r),
-                               seenAlbums.insert(p.id).inserted { albums.append(p) }
-                            // Albums also appear as musicResponsiveListItemRenderer with browse endpoint
-                            if let r = itemDict?["musicResponsiveListItemRenderer"] as? [String: Any],
-                               let p = parseAlbumFromResponsiveRenderer(r),
-                               seenAlbums.insert(p.id).inserted { albums.append(p) }
-                        } else {
-                            if let r = itemDict?["musicResponsiveListItemRenderer"] as? [String: Any],
-                               let t = parseTrackRenderer(r),
-                               seenSongs.insert(t.id).inserted { songs.append(t) }
-                        }
-                    }
-                }
-                // Top result cards (musicCardShelfRenderer) can contain albums
-                if let card = dict["musicCardShelfRenderer"] as? [String: Any] {
-                    if let nav = card["title"] as? [String: Any],
-                       let runs = nav["runs"] as? [[String: Any]],
-                       let firstRun = runs.first,
-                       let navEnd = firstRun["navigationEndpoint"] as? [String: Any],
-                       let browse = navEnd["browseEndpoint"] as? [String: Any],
-                       let browseId = browse["browseId"] as? String,
-                       (browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK")),
-                       let title = firstRun["text"] as? String {
-                        let subtitleRuns = (card["subtitle"] as? [String: Any])?["runs"] as? [[String: Any]]
-                        let subtitle = subtitleRuns?.compactMap { $0["text"] as? String }.joined()
-                        let thumbRenderer = (card["thumbnail"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any]
-                        let thumbObj = thumbRenderer?["thumbnail"] as? [String: Any]
-                        let thumbnailURL = (thumbObj?["thumbnails"] as? [[String: Any]])?.last?["url"] as? String
-                        let pid = browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId
-                        let p = Playlist(id: pid, title: title, subtitle: subtitle, thumbnailURL: thumbnailURL, tracks: [])
-                        if seenAlbums.insert(p.id).inserted { albums.append(p) }
-                    }
-                }
-                stack.append(contentsOf: dict.values)
-            } else if let arr = obj as? [Any] {
-                stack.append(contentsOf: arr)
-            }
-        }
-
+        var seen = Set<String>()
+        let songs = songItems.compactMap { parseTrackRenderer($0) }.filter { seen.insert($0.id).inserted }
+        let albums = albumItems.compactMap { parseAlbumFromResponsiveRenderer($0) }.filter { seen.insert($0.id).inserted }
         return SearchResults(songs: songs, albums: albums)
+    }
+
+    /// musicResponsiveListItemRenderers of a filtered search, in YouTube's ranking order.
+    nonisolated static func searchShelfItems(_ data: Data) -> [[String: Any]] {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tabs = ((json["contents"] as? [String: Any])?["tabbedSearchResultsRenderer"] as? [String: Any])?["tabs"] as? [[String: Any]],
+              let sections = ((((tabs.first?["tabRenderer"] as? [String: Any])?["content"] as? [String: Any])?["sectionListRenderer"] as? [String: Any])?["contents"] as? [[String: Any]])
+        else { return [] }
+        return sections
+            .compactMap { ($0["musicShelfRenderer"] as? [String: Any])?["contents"] as? [[String: Any]] }
+            .flatMap { $0 }
+            .compactMap { $0["musicResponsiveListItemRenderer"] as? [String: Any] }
     }
 
     func fetchHomeFeed() async throws -> [Playlist] {
@@ -260,10 +222,28 @@ final class YTMusicClient: NSObject, ObservableObject {
 
     func fetchHomeFeedSectioned() async throws -> [HomeFeedSection] {
         let data = try await ytmRequest(endpoint: "browse", body: ["browseId": "FEmusic_home"])
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard var page = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw YTMError.parseError("invalid JSON root")
         }
-        return parseHomeSections(json)
+        // The first page holds only ~3 shelves; the rest (Listen again, Mixed for you, ...)
+        // arrive through continuations, the way YouTube Music loads them as you scroll.
+        var sections = parseHomeSections(page)
+        for _ in 0..<4 {
+            guard let token = Self.nextSectionContinuation(page),
+                  let more = try? await ytmRequest(endpoint: "browse", body: ["continuation": token]),
+                  let next = try? JSONSerialization.jsonObject(with: more) as? [String: Any] else { break }
+            sections += parseHomeSections(next)
+            page = next
+        }
+        return sections
+    }
+
+    /// Continuation token of a browse page's section list (first page or a continuation page).
+    nonisolated static func nextSectionContinuation(_ json: [String: Any]) -> String? {
+        let firstPage = ((((((json["contents"] as? [String: Any])?["singleColumnBrowseResultsRenderer"] as? [String: Any])?["tabs"] as? [[String: Any]])?.first?["tabRenderer"] as? [String: Any])?["content"] as? [String: Any])?["sectionListRenderer"] as? [String: Any])
+        let laterPage = (json["continuationContents"] as? [String: Any])?["sectionListContinuation"] as? [String: Any]
+        let list = laterPage ?? firstPage
+        return ((list?["continuations"] as? [[String: Any]])?.first?["nextContinuationData"] as? [String: Any])?["continuation"] as? String
     }
 
     func fetchRecentlyPlayed() async throws -> [Track] {
@@ -542,22 +522,22 @@ final class YTMusicClient: NSObject, ObservableObject {
 
     private func parseHomeSections(_ json: [String: Any]) -> [HomeFeedSection] {
         var sections: [HomeFeedSection] = []
-
-        var sectionStack: [(Any, Int)] = [(json, 0)]
-        while let (obj, depth) = sectionStack.popLast() {
-            guard depth < 20 else { continue }
+        // Recursive so arrays keep YouTube's order (a popLast stack listed shelves bottom-up).
+        func walk(_ obj: Any, depth: Int) {
+            guard depth < 20 else { return }
             if let dict = obj as? [String: Any] {
                 if let carousel = dict["musicCarouselShelfRenderer"] as? [String: Any] {
                     if let section = parseCarouselSection(carousel) { sections.append(section) }
                 } else if let shelf = dict["musicShelfRenderer"] as? [String: Any] {
                     if let section = parseShelfSection(shelf) { sections.append(section) }
                 } else {
-                    for v in dict.values { sectionStack.append((v, depth + 1)) }
+                    for v in dict.values { walk(v, depth: depth + 1) }
                 }
             } else if let arr = obj as? [Any] {
-                for item in arr { sectionStack.append((item, depth + 1)) }
+                for item in arr { walk(item, depth: depth + 1) }
             }
         }
+        walk(json, depth: 0)
         return sections
     }
 
@@ -569,9 +549,14 @@ final class YTMusicClient: NSObject, ObservableObject {
 
         for item in items {
             guard let dict = item as? [String: Any] else { continue }
-            if let r = dict["musicTwoRowItemRenderer"] as? [String: Any],
-               let p = parsePlaylistRenderer(r) {
-                playlists.append(p)
+            if let r = dict["musicTwoRowItemRenderer"] as? [String: Any] {
+                // "Listen again" mixes songs (watchEndpoint) with albums/playlists (browseEndpoint).
+                // Artist channels (UC…) aren't playlists, so they're skipped here.
+                if let t = parseTwoRowTrack(r) {
+                    tracks.append(t)
+                } else if let p = parsePlaylistRenderer(r), !p.id.hasPrefix("UC") {
+                    playlists.append(p)
+                }
             } else if let r = dict["musicResponsiveListItemRenderer"] as? [String: Any],
                       let t = parseTrackRenderer(r) {
                 tracks.append(t)
@@ -579,6 +564,23 @@ final class YTMusicClient: NSObject, ObservableObject {
         }
         guard !playlists.isEmpty || !tracks.isEmpty else { return nil }
         return HomeFeedSection(title: title, playlists: playlists, tracks: tracks)
+    }
+
+    private func parseTwoRowTrack(_ r: [String: Any]) -> Track? {
+        guard let vid = ((r["navigationEndpoint"] as? [String: Any])?["watchEndpoint"] as? [String: Any])?["videoId"] as? String,
+              let title = ((r["title"] as? [String: Any])?["runs"] as? [[String: Any]])?.first?["text"] as? String
+        else { return nil }
+        let runs = (r["subtitle"] as? [String: Any])?["runs"] as? [[String: Any]] ?? []
+        func browseId(_ run: [String: Any]) -> String? {
+            ((run["navigationEndpoint"] as? [String: Any])?["browseEndpoint"] as? [String: Any])?["browseId"] as? String
+        }
+        let artistRuns = runs.filter { browseId($0)?.hasPrefix("UC") == true }
+        let artist = artistRuns.isEmpty
+            ? runs.compactMap { $0["text"] as? String }.filter { $0 != " • " && $0 != "Song" && $0 != "Video" }.joined()
+            : artistRuns.compactMap { $0["text"] as? String }.joined(separator: ", ")
+        let thumbs = ((((r["thumbnailRenderer"] as? [String: Any])?["musicThumbnailRenderer"] as? [String: Any])?["thumbnail"] as? [String: Any])?["thumbnails"] as? [[String: Any]])
+        return Track(id: vid, videoId: vid, title: title, artist: artist, durationSeconds: 0,
+                     thumbnailURL: thumbs?.last?["url"] as? String, artistId: artistRuns.first.flatMap(browseId))
     }
 
     private func parseShelfSection(_ shelf: [String: Any]) -> HomeFeedSection? {
@@ -674,7 +676,6 @@ final class YTMusicClient: NSObject, ObservableObject {
         let ytCookies = authCookies.filter { $0.domain.hasSuffix(".youtube.com") || $0.domain == "youtube.com" }
         let cookieStr = ytCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
         request.setValue(cookieStr, forHTTPHeaderField: "Cookie")
-        print("[YTM] yt cookies: \(ytCookies.map(\.name).joined(separator: ", "))")
 
         // SAPISIDHASH — use the .youtube.com SAPISID so it matches the Cookie header
         let sapisid = ytCookies.first(where: { $0.name == "SAPISID" })?.value
@@ -682,7 +683,6 @@ final class YTMusicClient: NSObject, ObservableObject {
                    ?? authCookies.first(where: { $0.name == "SAPISID" })?.value
         if let sapisid {
             request.setValue(generateSAPISIDHASH(sapisid: sapisid), forHTTPHeaderField: "Authorization")
-            print("[YTM] SAPISIDHASH using: \(sapisid.prefix(8))…")
         } else {
             print("[YTM] WARNING: no SAPISID found — auth will fail")
         }
@@ -748,7 +748,7 @@ final class YTMusicClient: NSObject, ObservableObject {
             "clientName": "WEB_REMIX",
             "clientVersion": "1.\(datePart).01.00",
             "hl": "en",
-            "gl": "US",
+            "gl": Locale.current.region?.identifier ?? "US",  // charts/new releases follow the phone's region
             "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36,gzip(gfe)"
         ]
         if !visitorData.isEmpty { client["visitorData"] = visitorData }
@@ -765,6 +765,10 @@ final class YTMusicClient: NSObject, ObservableObject {
     private var sessionCookies: [HTTPCookie] = []
 
     func fetchAudioStreamURL(videoId: String) async throws -> URL {
+        // 0. VISIONOS returns plain URLs with no player JS, cipher or PO token (yt-dlp's
+        //    default since 2026). ANDROID_VR now needs a PO token: its URLs 403 after ~1MB.
+        if let url = try? await fetchVisionOSStreamURL(videoId: videoId) { return url }
+
         // 1. Get player JS path from watch page (fast; needed for JSContext + STS)
         let html = await fetchWatchPageHTML(videoId: videoId)
         var playerPath = extractPlayerJSPath(from: html)
@@ -783,8 +787,8 @@ final class YTMusicClient: NSObject, ObservableObject {
         let sts = ctx.objectForKeyedSubscript("__ytSTS")?.toInt32() ?? 0
         print("[YTM] STS=\(sts)")
 
-        // 3. Try alternate clients — ANDROID_VR first (no cipher/n-param/po_token needed)
-        for clientName in ["ANDROID_VR", "MWEB", "WEB_CREATOR"] {
+        // 3. Try alternate clients
+        for clientName in ["MWEB", "WEB_CREATOR"] {
             if let altURL = try? await fetchDirectURLViaClient(clientName, videoId: videoId, ctx: ctx) {
                 return altURL
             }
@@ -884,6 +888,64 @@ final class YTMusicClient: NSObject, ObservableObject {
         return finalURL
     }
 
+    // Anonymous visitor id for VISIONOS. Without one, YouTube answers many videos with
+    // "Sign in to confirm you're not a bot". Kept separate from the signed-in visitorData.
+    private var anonVisitorData = ""
+
+    private func fetchVisionOSStreamURL(videoId: String) async throws -> URL {
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
+        if anonVisitorData.isEmpty {
+            var page = URLRequest(url: URL(string: "https://www.youtube.com/")!)
+            page.setValue(ua, forHTTPHeaderField: "User-Agent")
+            page.setValue("SOCS=CAI", forHTTPHeaderField: "Cookie")  // skip the EU consent page
+            if let (data, _) = try? await URLSession.shared.data(for: page),
+               let html = String(data: data, encoding: .utf8),
+               let m = html.firstMatch(of: /"VISITOR_DATA":"([^"]+)"/) {
+                anonVisitorData = String(m.1)
+            }
+        }
+
+        var req = URLRequest(url: URL(string: "https://www.youtube.com/youtubei/v1/player?prettyPrint=false")!)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        req.setValue(ua, forHTTPHeaderField: "User-Agent")
+        req.setValue("101", forHTTPHeaderField: "X-Youtube-Client-Name")
+        req.setValue("1.02", forHTTPHeaderField: "X-Youtube-Client-Version")
+        var client: [String: Any] = [
+            "clientName": "VISIONOS", "clientVersion": "1.02",
+            "deviceMake": "Apple", "deviceModel": "RealityDevice17,1",
+            "osName": "visionOS", "osVersion": "26.5.23O471",
+            "userAgent": ua, "hl": "en"
+        ]
+        if !anonVisitorData.isEmpty {
+            client["visitorData"] = anonVisitorData
+            req.setValue(anonVisitorData, forHTTPHeaderField: "X-Goog-Visitor-Id")
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: [
+            "videoId": videoId, "context": ["client": client],
+            "contentCheckOk": true, "racyCheckOk": true
+        ] as [String: Any])
+
+        let (data, _) = try await URLSession.shared.data(for: req)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let ps = json?["playabilityStatus"] as? [String: Any]
+        guard ps?["status"] as? String == "OK", let sd = json?["streamingData"] as? [String: Any] else {
+            anonVisitorData = ""  // fetch a fresh visitor id next time
+            print("[YTM][VISIONOS] not playable: \(ps?["reason"] as? String ?? "?")")
+            throw YTMError.parseError("VISIONOS not playable")
+        }
+        // AAC only: the Watch can't play webm/opus.
+        let best = (sd["adaptiveFormats"] as? [[String: Any]] ?? [])
+            .filter { ($0["mimeType"] as? String ?? "").hasPrefix("audio/mp4") && $0["url"] is String }
+            .max { ($0["bitrate"] as? Int ?? 0) < ($1["bitrate"] as? Int ?? 0) }
+        guard let urlStr = best?["url"] as? String, let url = makeURL(urlStr) else {
+            throw YTMError.parseError("VISIONOS: no AAC url")
+        }
+        print("[YTM][VISIONOS] ✓ itag=\(best?["itag"] ?? "?")")
+        return url
+    }
+
     // URL construction tolerant of unencoded | characters that YouTube includes in fexp params
     private func makeURL(_ s: String) -> URL? {
         if let u = URL(string: s) { return u }
@@ -921,8 +983,7 @@ final class YTMusicClient: NSObject, ObservableObject {
             }
             if !captured.isEmpty {
                 sessionCookies = captured
-                let names = captured.map(\.name).joined(separator: ", ")
-                print("[YTM] captured \(captured.count) session cookies: \(names)")
+                print("[YTM] captured \(captured.count) session cookies")
             } else {
                 print("[YTM] no session cookies in watch page response")
             }
@@ -1048,32 +1109,9 @@ final class YTMusicClient: NSObject, ObservableObject {
 
         var clientDict: [String: Any]
         var contextExtra: [String: Any] = [:]
-        var needsAuth = true
+        let needsAuth = true
 
         switch clientName {
-        case "ANDROID_VR":
-            let vrUA = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
-            req.setValue(vrUA, forHTTPHeaderField: "User-Agent")
-            req.setValue("28", forHTTPHeaderField: "X-Youtube-Client-Name")
-            req.setValue("1.65.10", forHTTPHeaderField: "X-Youtube-Client-Version")
-            if !visitorData.isEmpty {
-                req.setValue(visitorData, forHTTPHeaderField: "X-Goog-Visitor-Id")
-            }
-            needsAuth = false
-            clientDict = [
-                "clientName": "ANDROID_VR",
-                "clientVersion": "1.65.10",
-                "deviceMake": "Oculus",
-                "deviceModel": "Quest 3",
-                "osName": "Android",
-                "osVersion": "12L",
-                "androidSdkVersion": 32,
-                "userAgent": vrUA,
-                "hl": "en",
-                "timeZone": "UTC",
-                "utcOffsetMinutes": 0
-            ]
-
         case "MWEB":
             let mUA = "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36"
             req.setValue(mUA, forHTTPHeaderField: "User-Agent")

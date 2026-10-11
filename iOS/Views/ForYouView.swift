@@ -58,6 +58,14 @@ struct ForYouView: View {
     @State private var albumTarget: Playlist?
     @State private var artistTarget: (id: String, name: String)?
 
+    private func trackRow(_ track: Track) -> some View {
+        ForYouTrackRow(track: track, onStartRadio: { radioTrack = $0 }, onNavigateToArtist: { id, name in
+            artistTarget = (id, name)
+        }, onNavigateToAlbum: { id, title, thumb in
+            albumTarget = Playlist(id: id, title: title ?? "Album", thumbnailURL: thumb, tracks: [])
+        })
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -85,35 +93,7 @@ struct ForYouView: View {
                                 .offset(y: appeared ? 0 : 10)
                             }
 
-                            // Album/playlist sections first (For You, Listen Again, etc.)
-                            ForEach(Array(store.sections.filter { !$0.playlists.isEmpty }.enumerated()), id: \.element.id) { sectionIdx, section in
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text(section.title)
-                                        .sectionHeader()
-                                        .padding(.horizontal, 4)
-
-                                    ScrollView(.horizontal, showsIndicators: false) {
-                                        LazyHStack(spacing: 12) {
-                                            ForEach(section.playlists) { playlist in
-                                                NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
-                                                    PlaylistCard(playlist: playlist)
-                                                }
-                                                .buttonStyle(.plain)
-                                            }
-                                        }
-                                        .padding(.horizontal, 2)
-                                    }
-                                }
-                                .opacity(appeared ? 1 : 0)
-                                .offset(y: appeared ? 0 : 10)
-                                .animation(
-                                    .spring(response: 0.45, dampingFraction: 0.82)
-                                        .delay(0.08 + Double(sectionIdx) * 0.04),
-                                    value: appeared
-                                )
-                            }
-
-                            // Recently Played tracks
+                            // Recently Played: your actual YouTube Music history, so it leads.
                             if !store.recentlyPlayed.isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Text("Recently Played")
@@ -121,11 +101,7 @@ struct ForYouView: View {
                                         .padding(.horizontal, 4)
 
                                     ForEach(Array(store.recentlyPlayed.prefix(10).enumerated()), id: \.element.id) { i, track in
-                                        ForYouTrackRow(track: track, onStartRadio: { radioTrack = $0 }, onNavigateToArtist: { id, name in
-                                            artistTarget = (id, name)
-                                        }, onNavigateToAlbum: { id, title, thumb in
-                                            albumTarget = Playlist(id: id, title: title ?? "Album", thumbnailURL: thumb, tracks: [])
-                                        })
+                                        trackRow(track)
                                             .opacity(appeared ? 1 : 0)
                                             .offset(y: appeared ? 0 : 8)
                                             .animation(
@@ -139,26 +115,29 @@ struct ForYouView: View {
                                 .offset(y: appeared ? 0 : 10)
                             }
 
-                            // Track-only sections after
-                            ForEach(Array(store.sections.filter { $0.playlists.isEmpty && !$0.tracks.isEmpty }.enumerated()), id: \.element.id) { sectionIdx, section in
+                            // Home shelves in YouTube Music's own order (Quick picks, Listen again, ...)
+                            ForEach(Array(store.sections.enumerated()), id: \.element.id) { sectionIdx, section in
                                 VStack(alignment: .leading, spacing: 10) {
                                     Text(section.title)
                                         .sectionHeader()
                                         .padding(.horizontal, 4)
 
-                                    ForEach(Array(section.tracks.enumerated()), id: \.element.id) { i, track in
-                                        ForYouTrackRow(track: track, onStartRadio: { radioTrack = $0 }, onNavigateToArtist: { id, name in
-                                            artistTarget = (id, name)
-                                        }, onNavigateToAlbum: { id, title, thumb in
-                                            albumTarget = Playlist(id: id, title: title ?? "Album", thumbnailURL: thumb, tracks: [])
-                                        })
-                                            .opacity(appeared ? 1 : 0)
-                                            .offset(y: appeared ? 0 : 8)
-                                            .animation(
-                                                .spring(response: 0.4, dampingFraction: 0.82)
-                                                    .delay(0.05 + Double(i) * 0.025),
-                                                value: appeared
-                                            )
+                                    if !section.playlists.isEmpty {
+                                        ScrollView(.horizontal, showsIndicators: false) {
+                                            LazyHStack(spacing: 12) {
+                                                ForEach(section.playlists) { playlist in
+                                                    NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
+                                                        PlaylistCard(playlist: playlist)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                }
+                                            }
+                                            .padding(.horizontal, 2)
+                                        }
+                                    }
+
+                                    ForEach(section.tracks.prefix(10)) { track in
+                                        trackRow(track)
                                     }
                                 }
                                 .opacity(appeared ? 1 : 0)

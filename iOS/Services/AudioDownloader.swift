@@ -442,17 +442,10 @@ final class AudioDownloader: NSObject, ObservableObject {
     }
 
     static func buildStreamRequest(streamURL: URL) -> URLRequest {
-        let comps = URLComponents(url: streamURL, resolvingAgainstBaseURL: false)
-        let clientParam = comps?.queryItems?.first(where: { $0.name == "c" })?.value ?? ""
-        let isVR = clientParam == "ANDROID_VR"
         var req = URLRequest(url: streamURL)
         req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
         req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
-        if isVR {
-            req.setValue("com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip", forHTTPHeaderField: "User-Agent")
-        } else {
-            req.setValue("Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36", forHTTPHeaderField: "User-Agent")
-        }
+        req.setValue("Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36", forHTTPHeaderField: "User-Agent")
         if let cookieHeader = YTMusicClient.shared.cookieHeaderForYouTube() {
             req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }

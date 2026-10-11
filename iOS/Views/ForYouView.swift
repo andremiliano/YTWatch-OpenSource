@@ -66,6 +66,30 @@ struct ForYouView: View {
         })
     }
 
+    /// Song shelf laid out like YouTube Music's Quick picks: 4 rows per column, swiped
+    /// sideways, with one button to download the whole shelf.
+    private func trackShelf(_ title: String, tracks: [Track]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title).sectionHeader()
+                Spacer()
+                ShelfDownloadButton(tracks: tracks)
+            }
+            .padding(.horizontal, 4)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHGrid(rows: Array(repeating: GridItem(.fixed(60), spacing: 2), count: min(4, tracks.count)), spacing: 14) {
+                    ForEach(Array(tracks.enumerated()), id: \.offset) { _, track in
+                        trackRow(track)
+                            .containerRelativeFrame(.horizontal) { width, _ in width * 0.88 }
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.viewAligned)
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -95,32 +119,19 @@ struct ForYouView: View {
 
                             // Recently Played: your actual YouTube Music history, so it leads.
                             if !store.recentlyPlayed.isEmpty {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text("Recently Played")
-                                        .sectionHeader()
-                                        .padding(.horizontal, 4)
-
-                                    ForEach(Array(store.recentlyPlayed.prefix(10).enumerated()), id: \.element.id) { i, track in
-                                        trackRow(track)
-                                            .opacity(appeared ? 1 : 0)
-                                            .offset(y: appeared ? 0 : 8)
-                                            .animation(
-                                                .spring(response: 0.4, dampingFraction: 0.82)
-                                                    .delay(0.08 + Double(i) * 0.025),
-                                                value: appeared
-                                            )
-                                    }
-                                }
-                                .opacity(appeared ? 1 : 0)
-                                .offset(y: appeared ? 0 : 10)
+                                trackShelf("Recently Played", tracks: Array(store.recentlyPlayed.prefix(20)))
+                                    .opacity(appeared ? 1 : 0)
+                                    .offset(y: appeared ? 0 : 10)
                             }
 
                             // Home shelves in YouTube Music's own order (Quick picks, Listen again, ...)
                             ForEach(Array(store.sections.enumerated()), id: \.element.id) { sectionIdx, section in
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Text(section.title)
-                                        .sectionHeader()
-                                        .padding(.horizontal, 4)
+                                    if section.tracks.isEmpty {
+                                        Text(section.title)
+                                            .sectionHeader()
+                                            .padding(.horizontal, 4)
+                                    }
 
                                     if !section.playlists.isEmpty {
                                         ScrollView(.horizontal, showsIndicators: false) {
@@ -136,8 +147,8 @@ struct ForYouView: View {
                                         }
                                     }
 
-                                    ForEach(section.tracks.prefix(10)) { track in
-                                        trackRow(track)
+                                    if !section.tracks.isEmpty {
+                                        trackShelf(section.title, tracks: section.tracks)
                                     }
                                 }
                                 .opacity(appeared ? 1 : 0)
@@ -158,6 +169,7 @@ struct ForYouView: View {
                         .padding(.top, 12)
                         .padding(.bottom, 40)
                     }
+                    .refreshable { await store.refresh() }
                 }
             }
             .navigationDestination(isPresented: Binding(
@@ -448,21 +460,17 @@ private struct ForYouTrackRow: View {
 
             Spacer()
 
-            Text(track.durationFormatted)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(Color.appGhost)
+            if track.durationSeconds > 0 {
+                Text(track.durationFormatted)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.appGhost)
+            }
 
             TrackDownloadButton(track: track)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity)
-        .background(Color.appSurface)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.appBorder, lineWidth: 0.5)
-        )
     }
 
     var body: some View {
@@ -493,6 +501,41 @@ private struct ForYouTrackRow: View {
                     }
                 }
             }
+    }
+}
+
+// MARK: - Shelf "Download all"
+
+private struct ShelfDownloadButton: View {
+    let tracks: [Track]
+    @ObservedObject private var downloader = AudioDownloader.shared
+
+    var body: some View {
+        let missing = tracks.filter { !downloader.isDownloaded($0.videoId) }
+        // Tracks already downloading stay out of the button, so the rest can still be queued.
+        let startable = missing.filter { !downloader.isDownloading($0.videoId) && !downloader.isQueued($0.videoId) }
+        if missing.isEmpty {
+            Label("Downloaded", systemImage: "checkmark.circle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.ytRed)
+        } else if startable.isEmpty {
+            HStack(spacing: 6) {
+                ProgressView().tint(Color.ytRed).scaleEffect(0.7)
+                Text("\(missing.count) left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.appDim)
+            }
+        } else {
+            Button {
+                downloader.downloadBatch(tracks: startable, playlistId: "library", playlistTitle: "Downloads")
+            } label: {
+                Label(startable.count == tracks.count ? "Download all" : "Download \(startable.count) more",
+                      systemImage: "arrow.down.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.ytRed)
+            }
+            .buttonStyle(.plain)
+        }
     }
 }
 

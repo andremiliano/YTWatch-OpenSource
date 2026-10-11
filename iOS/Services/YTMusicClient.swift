@@ -765,10 +765,23 @@ final class YTMusicClient: NSObject, ObservableObject {
     private var sessionCookies: [HTTPCookie] = []
 
     func fetchAudioStreamURL(videoId: String) async throws -> URL {
-        // 0. VISIONOS returns plain URLs with no player JS, cipher or PO token (yt-dlp's
-        //    default since 2026). ANDROID_VR now needs a PO token: its URLs 403 after ~1MB.
-        if let url = try? await fetchVisionOSStreamURL(videoId: videoId) { return url }
+        // VISIONOS returns plain URLs with no player JS, cipher or PO token (yt-dlp's
+        // default since 2026). ANDROID_VR now needs a PO token: its URLs 403 after ~1MB.
+        let visionError: Error
+        do { return try await fetchVisionOSStreamURL(videoId: videoId) } catch { visionError = error }
+        do {
+            return try await fetchAudioStreamURLViaPlayerJS(videoId: videoId)
+        } catch {
+            // Surface both reasons: the fallback's error alone hides why VISIONOS failed.
+            func reason(_ e: Error) -> String {
+                if case .parseError(let m) = e as? YTMError { return m }
+                return e.localizedDescription
+            }
+            throw YTMError.parseError("\(reason(visionError)) | fallback: \(reason(error))")
+        }
+    }
 
+    private func fetchAudioStreamURLViaPlayerJS(videoId: String) async throws -> URL {
         // 1. Get player JS path from watch page (fast; needed for JSContext + STS)
         let html = await fetchWatchPageHTML(videoId: videoId)
         var playerPath = extractPlayerJSPath(from: html)
@@ -892,13 +905,33 @@ final class YTMusicClient: NSObject, ObservableObject {
     // "Sign in to confirm you're not a bot". Kept separate from the signed-in visitorData.
     private var anonVisitorData = ""
 
+    // No cookie jar: URLSession.shared stores YouTube's Set-Cookie replies from signed-in
+    // requests and would attach them here, and VISIONOS doesn't work with account cookies.
+    private static let anonSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 20
+        return URLSession(configuration: config)
+    }()
+
     private func fetchVisionOSStreamURL(videoId: String) async throws -> URL {
+        do {
+            return try await fetchVisionOSStreamURLOnce(videoId: videoId)
+        } catch {
+            // A stale visitor id is the usual cause of "confirm you're not a bot": retry once fresh.
+            anonVisitorData = ""
+            return try await fetchVisionOSStreamURLOnce(videoId: videoId)
+        }
+    }
+
+    private func fetchVisionOSStreamURLOnce(videoId: String) async throws -> URL {
         let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
         if anonVisitorData.isEmpty {
             var page = URLRequest(url: URL(string: "https://www.youtube.com/")!)
             page.setValue(ua, forHTTPHeaderField: "User-Agent")
             page.setValue("SOCS=CAI", forHTTPHeaderField: "Cookie")  // skip the EU consent page
-            if let (data, _) = try? await URLSession.shared.data(for: page),
+            if let (data, _) = try? await Self.anonSession.data(for: page),
                let html = String(data: data, encoding: .utf8),
                let m = html.firstMatch(of: /"VISITOR_DATA":"([^"]+)"/) {
                 anonVisitorData = String(m.1)
@@ -927,13 +960,13 @@ final class YTMusicClient: NSObject, ObservableObject {
             "contentCheckOk": true, "racyCheckOk": true
         ] as [String: Any])
 
-        let (data, _) = try await URLSession.shared.data(for: req)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let (data, resp) = try await Self.anonSession.data(for: req)
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         let ps = json?["playabilityStatus"] as? [String: Any]
         guard ps?["status"] as? String == "OK", let sd = json?["streamingData"] as? [String: Any] else {
-            anonVisitorData = ""  // fetch a fresh visitor id next time
-            print("[YTM][VISIONOS] not playable: \(ps?["reason"] as? String ?? "?")")
-            throw YTMError.parseError("VISIONOS not playable")
+            let why = ps?["reason"] as? String ?? ps?["status"] as? String ?? "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)"
+            print("[YTM][VISIONOS] not playable: \(why) (visitor id: \(!anonVisitorData.isEmpty))")
+            throw YTMError.parseError("VISIONOS: \(why)")
         }
         // AAC only: the Watch can't play webm/opus.
         let best = (sd["adaptiveFormats"] as? [[String: Any]] ?? [])

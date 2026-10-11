@@ -446,6 +446,9 @@ final class AudioDownloader: NSObject, ObservableObject {
         req.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
         req.setValue("https://www.youtube.com/", forHTTPHeaderField: "Referer")
         req.setValue("Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.91 Mobile Safari/537.36", forHTTPHeaderField: "User-Agent")
+        // googlevideo throttles plain GETs to ~32KB/s (4MB took 2 minutes); any Range request
+        // is served at full speed. 206 is within the 2xx the completion handler accepts.
+        req.setValue("bytes=0-", forHTTPHeaderField: "Range")
         if let cookieHeader = YTMusicClient.shared.cookieHeaderForYouTube() {
             req.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }

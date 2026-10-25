@@ -95,7 +95,7 @@ final class WatchPlayer: ObservableObject {
 
     // Recently played tracking
     @Published var recentlyPlayed: [RecentPlay] = []
-    private static let maxRecentPlays = 50
+    private static let maxRecentPlays = 200  // also ranks artists by last listen
 
     private var player: AVPlayer?
     private var playerItem: AVPlayerItem?

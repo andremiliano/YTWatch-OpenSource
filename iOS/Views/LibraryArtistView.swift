@@ -4,13 +4,68 @@ import SwiftUI
 
 struct LibraryArtistsList: View {
     let artists: [ArtistGroup]
+    @ObservedObject private var downloader = AudioDownloader.shared
+    @ObservedObject private var history = ForYouStore.shared
+    @AppStorage("artistSort") private var sort: ArtistIndex.Sort = .recent
+    @State private var query = ""
+
+    private var shown: [ArtistGroup] {
+        let sorted = ArtistIndex.sorted(artists, by: sort,
+                                        recent: history.recentlyPlayed.map(\.videoId),
+                                        isDownloaded: { downloader.isDownloaded($0) })
+        return ArtistIndex.filter(sorted, query: query)
+    }
 
     var body: some View {
-        ForEach(artists) { artist in
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(Color.appFaint)
+                TextField("Search artists", text: $query)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(Color.appFaint)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .font(.system(size: 14))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.appSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            Menu {
+                Picker("Sort", selection: $sort) {
+                    ForEach(ArtistIndex.Sort.allCases) { Text($0.rawValue).tag($0) }
+                }
+            } label: {
+                Label(sort.rawValue, systemImage: "arrow.up.arrow.down")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.ytRed)
+            }
+        }
+        .padding(.bottom, 6)
+        // "Recent" ranks by YouTube Music history, which only the For You tab loads.
+        .task(id: sort) {
+            guard sort == .recent, history.recentlyPlayed.isEmpty else { return }
+            history.recentlyPlayed = (try? await YTMusicClient.shared.fetchRecentlyPlayed()) ?? []
+        }
+
+        ForEach(shown) { artist in
             NavigationLink(destination: LibraryArtistView(artist: artist)) {
                 LibraryArtistRow(artist: artist)
             }
             .buttonStyle(.plain)
+        }
+
+        if shown.isEmpty {
+            Text(query.isEmpty ? "No artists yet" : "No artists match \"\(query)\"")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.appFaint)
+                .padding(.top, 24)
         }
     }
 }

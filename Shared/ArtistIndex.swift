@@ -41,4 +41,46 @@ enum ArtistIndex {
             .map { ArtistGroup(id: $0, name: displayName[$0]!, artistId: ids[$0], tracks: byArtist[$0]!) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
+
+    enum Sort: String, CaseIterable, Identifiable {
+        case recent = "Recent", downloaded = "Most downloaded", name = "Name"
+        var id: String { rawValue }
+    }
+
+    /// `recent` is videoIds, most recently played first. An artist ranks by its most
+    /// recent song; artists never played follow, by name. `downloaded` ranks by how many
+    /// of the artist's songs `isDownloaded`, ties by name.
+    static func sorted(_ groups: [ArtistGroup], by sort: Sort,
+                       recent: [String], isDownloaded: (String) -> Bool) -> [ArtistGroup] {
+        func byName(_ a: ArtistGroup, _ b: ArtistGroup) -> Bool {
+            a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+        switch sort {
+        case .name:
+            return groups.sorted(by: byName)
+        case .downloaded:
+            let counts = Dictionary(uniqueKeysWithValues: groups.map { g in
+                (g.id, g.tracks.filter { isDownloaded($0.videoId) }.count)
+            })
+            return groups.sorted { a, b in
+                counts[a.id]! != counts[b.id]! ? counts[a.id]! > counts[b.id]! : byName(a, b)
+            }
+        case .recent:
+            var rank: [String: Int] = [:]
+            for (i, id) in recent.enumerated() where rank[id] == nil { rank[id] = i }
+            let best = Dictionary(uniqueKeysWithValues: groups.map { g in
+                (g.id, g.tracks.compactMap { rank[$0.videoId] }.min() ?? Int.max)
+            })
+            return groups.sorted { a, b in
+                best[a.id]! != best[b.id]! ? best[a.id]! < best[b.id]! : byName(a, b)
+            }
+        }
+    }
+
+    /// Case- and accent-insensitive name match; an empty query keeps everything.
+    static func filter(_ groups: [ArtistGroup], query: String) -> [ArtistGroup] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return groups }
+        return groups.filter { $0.name.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
 }

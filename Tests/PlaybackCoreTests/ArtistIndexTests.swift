@@ -40,4 +40,42 @@ final class ArtistIndexTests: XCTestCase {
         XCTAssertEqual(groups[0].name, "Central Cee")
         XCTAssertEqual(groups[0].tracks.count, 2)
     }
+
+    // MARK: - Sorting and search
+
+    private var library: [ArtistGroup] {
+        ArtistIndex.group([
+            track("a1", "Alpha"), track("a2", "Alpha"), track("a3", "Alpha"),
+            track("b1", "Bravo"),
+            track("c1", "Charlie"), track("c2", "Charlie"),
+            track("z1", "Zulu"),
+        ])
+    }
+
+    func testSortByDownloadedCountsOnlyDownloadedSongs() {
+        let downloaded: Set = ["b1", "c1", "c2", "a1"]
+        let names = ArtistIndex.sorted(library, by: .downloaded, recent: [],
+                                       isDownloaded: { downloaded.contains($0) }).map(\.name)
+        XCTAssertEqual(names, ["Charlie", "Alpha", "Bravo", "Zulu"],
+                       "Alpha has 3 songs but only 1 downloaded; ties break by name")
+    }
+
+    func testSortByRecentUsesEachArtistsLatestPlayThenName() {
+        // most recent first: Zulu, then a Charlie song, then an Alpha song
+        let names = ArtistIndex.sorted(library, by: .recent, recent: ["z1", "c2", "a3", "c1"],
+                                       isDownloaded: { _ in true }).map(\.name)
+        XCTAssertEqual(names, ["Zulu", "Charlie", "Alpha", "Bravo"], "never-played artists go last")
+    }
+
+    func testSortByName() {
+        let names = ArtistIndex.sorted(library, by: .name, recent: ["z1"], isDownloaded: { _ in false }).map(\.name)
+        XCTAssertEqual(names, ["Alpha", "Bravo", "Charlie", "Zulu"])
+    }
+
+    func testSearchIsCaseAndAccentInsensitive() {
+        let groups = ArtistIndex.group([track("a", "Beyoncé"), track("b", "Bad Bunny"), track("c", "Rosalía")])
+        XCTAssertEqual(ArtistIndex.filter(groups, query: "beyonce").map(\.name), ["Beyoncé"])
+        XCTAssertEqual(ArtistIndex.filter(groups, query: "  ROSALIA ").map(\.name), ["Rosalía"])
+        XCTAssertEqual(ArtistIndex.filter(groups, query: "").count, 3)
+    }
 }

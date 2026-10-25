@@ -6,6 +6,18 @@ struct LibraryView: View {
     @ObservedObject private var sync = WatchSyncManager.shared
     @ObservedObject private var client = YTMusicClient.shared
     @State private var appeared = false
+    @State private var showArtists = false
+
+    /// Everything you have: playlist tracks, Library Songs, and loose downloads (search, home).
+    private var artists: [ArtistGroup] {
+        let downloads = downloader.downloadedTracks.keys.sorted().compactMap { id -> Track? in
+            guard let m = downloader.trackMetadata[id] else { return nil }
+            return Track(id: id, videoId: id, title: m.title, artist: m.artist, album: m.album,
+                         durationSeconds: m.durationSeconds, thumbnailURL: m.thumbnailURL)
+        }
+        // Playlist copies first: they carry artist/album ids that download metadata lacks.
+        return ArtistIndex.group(store.playlists.flatMap(\.tracks) + store.librarySongs + downloads)
+    }
 
     private var libraryTitle: String {
         if let name = client.userDisplayName, !name.isEmpty {
@@ -47,6 +59,16 @@ struct LibraryView: View {
                                     .transition(.move(edge: .top).combined(with: .opacity))
                             }
 
+                            Picker("View", selection: $showArtists) {
+                                Text("Playlists").tag(false)
+                                Text("Artists").tag(true)
+                            }
+                            .pickerStyle(.segmented)
+                            .padding(.bottom, 10)
+
+                            if showArtists {
+                                LibraryArtistsList(artists: artists)
+                            } else {
                             if !store.librarySongs.isEmpty {
                                 NavigationLink(destination: PlaylistDetailView(playlist: Playlist(
                                     id: "FEmusic_liked_videos",
@@ -72,6 +94,7 @@ struct LibraryView: View {
                                         )
                                 }
                                 .buttonStyle(.plain)
+                            }
                             }
                         }
                         .padding(.horizontal, 16)

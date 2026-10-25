@@ -11,7 +11,7 @@ let package = Package(
             path: "Shared",
             sources: [
                 "PlaybackQueue.swift", "StallDetector.swift", "AudioFileGate.swift",
-                "PlaybackWatchdog.swift", "LibraryReconciler.swift", "EndOfItemDetector.swift",
+                "PlaybackWatchdog.swift", "LibraryReconciler.swift", "EndOfItemDetector.swift", "ArtistIndex.swift",
                 "Models/Track.swift", "Models/Playlist.swift",
             ]
         ),

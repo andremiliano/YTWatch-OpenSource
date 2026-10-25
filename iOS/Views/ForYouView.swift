@@ -73,7 +73,7 @@ struct ForYouView: View {
             HStack {
                 Text(title).sectionHeader()
                 Spacer()
-                ShelfDownloadButton(tracks: tracks)
+                DownloadAllButton(tracks: tracks)
             }
             .padding(.horizontal, 4)
 
@@ -504,9 +504,9 @@ private struct ForYouTrackRow: View {
     }
 }
 
-// MARK: - Shelf "Download all"
+// MARK: - "Download all" (also used by the Library artist page)
 
-private struct ShelfDownloadButton: View {
+struct DownloadAllButton: View {
     let tracks: [Track]
     @ObservedObject private var downloader = AudioDownloader.shared
 

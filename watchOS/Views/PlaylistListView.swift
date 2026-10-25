@@ -47,6 +47,10 @@ struct PlaylistListView: View {
         return Playlist(id: "__recently_played__", title: "Recently Played", thumbnailURL: nil, tracks: tracks)
     }
 
+    private var artists: [ArtistGroup] {
+        ArtistIndex.group(receiver.availablePlaylists.flatMap(\.tracks))
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -140,8 +144,22 @@ struct PlaylistListView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
 
-                            // Search results: matching tracks
+                            // Search results: matching artists, then tracks
                             if !searchText.isEmpty {
+                                let q = searchText.lowercased()
+                                let artistHits = artists.filter { $0.name.lowercased().contains(q) }.prefix(5)
+                                if !artistHits.isEmpty {
+                                    SectionLabel(title: "Artists")
+                                    ForEach(artistHits) { artist in
+                                        NavigationLink(destination: TrackListView(playlist: Playlist(
+                                            id: "__artist__\(artist.id)", title: artist.name, thumbnailURL: nil, tracks: artist.tracks
+                                        ))) {
+                                            SmartPlaylistRow(title: artist.name, icon: "person.fill", count: artist.tracks.count)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+
                                 let tracks = matchingTracks
                                 if !tracks.isEmpty {
                                     SectionLabel(title: "Tracks")
@@ -199,6 +217,17 @@ struct PlaylistListView: View {
                                     SmartPlaylistRow(title: "Recently Played", icon: "clock.arrow.circlepath", count: recent.tracks.count)
                                 }
                                 .buttonStyle(.plain)
+                            }
+
+                            // Browse by artist across every synced playlist
+                            if searchText.isEmpty {
+                                let all = artists
+                                if !all.isEmpty {
+                                    NavigationLink(destination: ArtistListView(artists: all)) {
+                                        SmartPlaylistRow(title: "Artists", icon: "person.2.fill", count: all.count, unit: "artists")
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
 
                             // Playlists
@@ -571,6 +600,7 @@ private struct SmartPlaylistRow: View {
     let title: String
     let icon: String
     let count: Int
+    var unit = "tracks"
 
     var body: some View {
         HStack(spacing: 10) {
@@ -590,7 +620,7 @@ private struct SmartPlaylistRow: View {
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("\(count) tracks")
+                Text("\(count) \(unit)")
                     .font(.system(size: 10))
                     .foregroundStyle(Color(white: 0.38))
             }

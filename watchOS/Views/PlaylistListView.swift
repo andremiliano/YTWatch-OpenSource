@@ -47,9 +47,7 @@ struct PlaylistListView: View {
         return Playlist(id: "__recently_played__", title: "Recently Played", thumbnailURL: nil, tracks: tracks)
     }
 
-    private var artists: [ArtistGroup] {
-        ArtistIndex.group(receiver.availablePlaylists.flatMap(\.tracks))
-    }
+    private var artists: [ArtistGroup] { receiver.artists }
 
     var body: some View {
         NavigationStack {
@@ -223,7 +221,7 @@ struct PlaylistListView: View {
                             if searchText.isEmpty {
                                 let all = artists
                                 if !all.isEmpty {
-                                    NavigationLink(destination: ArtistListView(artists: all)) {
+                                    NavigationLink(destination: ArtistListView()) {
                                         SmartPlaylistRow(title: "Artists", icon: "person.2.fill", count: all.count, unit: "artists")
                                     }
                                     .buttonStyle(.plain)

@@ -78,4 +78,31 @@ final class ArtistIndexTests: XCTestCase {
         XCTAssertEqual(ArtistIndex.filter(groups, query: "  ROSALIA ").map(\.name), ["Rosalía"])
         XCTAssertEqual(ArtistIndex.filter(groups, query: "").count, 3)
     }
+
+    // MARK: - Placeholder artists ("Album" bug)
+
+    func testPlaceholderArtistsAreRecognised() {
+        for bad in ["Album", "album", " EP ", "Single", "Unknown", "", "2006"] {
+            XCTAssertTrue(ArtistIndex.isPlaceholderArtist(bad), bad)
+        }
+        for good in ["Arctic Monkeys", "Album Leaf", "The 1975", "Blink-182"] {
+            XCTAssertFalse(ArtistIndex.isPlaceholderArtist(good), good)
+        }
+    }
+
+    func testAlbumIsNeverListedAsAnArtist() {
+        let groups = ArtistIndex.group([track("a", "Album"), track("b", "Arctic Monkeys")])
+        XCTAssertEqual(groups.map(\.name), ["Arctic Monkeys"])
+    }
+
+    func testWatchMergeUpgradesPlaceholderArtistsOnly() {
+        let local = [track("a", "Album"), track("b", "Local Name"), track("c", "Album")]
+        let incoming = [track("a", "Arctic Monkeys", artistId: "UC1"), track("b", "Phone Name"),
+                        track("c", "Album"), track("d", "New Song Artist")]
+        let merged = LibraryReconciler.mergedTracks(local: local, incoming: incoming)
+        XCTAssertEqual(merged.map(\.videoId), ["a", "b", "c", "d"], "local order kept, new appended")
+        XCTAssertEqual(merged.map(\.artist), ["Arctic Monkeys", "Local Name", "Album", "New Song Artist"],
+                       "only placeholders are replaced, and only by a real name")
+        XCTAssertEqual(merged[0].artistId, "UC1")
+    }
 }

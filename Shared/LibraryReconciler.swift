@@ -36,4 +36,21 @@ enum LibraryReconciler {
         guard let unsorted = playlists.first(where: { $0.id == unsortedId }) else { return [] }
         return unsorted.tracks.filter { $0.title == $0.videoId }.map(\.videoId)
     }
+
+    /// Tracks of a playlist the Watch already has, merged with the phone's copy: local
+    /// order and tracks are kept and new ones appended, but a local track whose artist is
+    /// a placeholder ("Album") takes the phone's copy when that one has a real artist —
+    /// otherwise corrected names never reach the Watch.
+    static func mergedTracks(local: [Track], incoming: [Track]) -> [Track] {
+        let incomingById = Dictionary(incoming.map { ($0.videoId, $0) }, uniquingKeysWith: { a, _ in a })
+        var merged = local.map { t -> Track in
+            guard ArtistIndex.isPlaceholderArtist(t.artist),
+                  let better = incomingById[t.videoId],
+                  !ArtistIndex.isPlaceholderArtist(better.artist) else { return t }
+            return better
+        }
+        var have = Set(local.map(\.videoId))
+        for t in incoming where have.insert(t.videoId).inserted { merged.append(t) }
+        return merged
+    }
 }

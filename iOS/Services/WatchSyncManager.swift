@@ -159,7 +159,66 @@ final class WatchSyncManager: NSObject, ObservableObject {
     }
 
     /// Asks Watch what tracks it actually has, fixes sync state, re-syncs missing tracks.
+    private var isRepairingArtists = false
+    private var unresolvableArtistIds = Set<String>()
+
+    /// Songs saved with "Album" (or another placeholder) as their artist get the real one
+    /// from YouTube Music: in phone downloads, the Library, and the Watch's playlist index,
+    /// which is re-sent so the Watch's copy is corrected too. Runs after each Library
+    /// refresh and from Verify & Re-sync; a no-op once nothing is left to fix.
+    func repairArtistNames() async {
+        guard !isRepairingArtists else { return }
+        isRepairingArtists = true
+        defer { isRepairingArtists = false }
+
+        let downloader = AudioDownloader.shared
+        var ids = Set(downloader.trackMetadata.filter { ArtistIndex.isPlaceholderArtist($0.value.artist) }.keys)
+        for playlist in syncedPlaylists + LibraryStore.shared.playlists {
+            for t in playlist.tracks where ArtistIndex.isPlaceholderArtist(t.artist) { ids.insert(t.videoId) }
+        }
+        ids.subtract(unresolvableArtistIds)
+        guard !ids.isEmpty else { return }
+        print("[Sync] Repairing artist names for \(ids.count) songs")
+
+        // ponytail: misses are remembered only until relaunch; persist them if lookups pile up.
+        var fixes: [String: (artist: String, artistId: String?)] = [:]
+        await withTaskGroup(of: (String, String?, String?).self) { group in
+            var pending = Array(ids).makeIterator()
+            func addNext() {
+                guard let id = pending.next() else { return }
+                group.addTask {
+                    let found = await YTMusicClient.shared.fetchSongArtist(videoId: id)
+                    return (id, found?.artist, found?.artistId)
+                }
+            }
+            for _ in 0..<4 { addNext() }  // a few at a time, not a burst of requests
+            for await (id, artist, artistId) in group {
+                if let artist { fixes[id] = (artist, artistId) } else { unresolvableArtistIds.insert(id) }
+                addNext()
+            }
+        }
+        guard !fixes.isEmpty else { return }
+
+        func patched(_ playlists: [Playlist]) -> [Playlist] {
+            playlists.map { playlist in
+                var p = playlist
+                p.tracks = playlist.tracks.map { t in
+                    fixes[t.videoId].map { t.withArtist($0.artist, artistId: $0.artistId) } ?? t
+                }
+                return p
+            }
+        }
+        downloader.applyArtistFixes(fixes)
+        LibraryStore.shared.playlists = patched(LibraryStore.shared.playlists)
+        LibraryStore.shared.saveToDisk()
+        syncedPlaylists = patched(syncedPlaylists)
+        saveSyncState()
+        pushAllPlaylistIndexes()
+        print("[Sync] Fixed artist names for \(fixes.count)/\(ids.count) songs")
+    }
+
     func verifySyncAndRepair() {
+        Task { await repairArtistNames() }  // works even when the Watch isn't reachable
         guard let session, session.activationState == .activated, session.isReachable else {
             print("[Sync] Watch not reachable for verify")
             return

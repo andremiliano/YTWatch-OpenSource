@@ -251,6 +251,32 @@ final class YTMusicClient: NSObject, ObservableObject {
         return try parseTracksFromPlaylist(data)
     }
 
+    /// The song's real artist from YouTube Music's watch panel, for repairing names saved
+    /// wrongly (e.g. "Album"). videoDetails.author is no good here: it's often a label.
+    func fetchSongArtist(videoId: String) async -> (artist: String, artistId: String?)? {
+        guard let data = try? await ytmRequest(endpoint: "next", body: ["videoId": videoId, "isAudioOnly": true]),
+              let json = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        var stack: [Any] = [json]
+        while let obj = stack.popLast() {
+            if let dict = obj as? [String: Any] {
+                if let r = dict["playlistPanelVideoRenderer"] as? [String: Any], r["videoId"] as? String == videoId {
+                    let runs = (r["longBylineText"] as? [String: Any])?["runs"] as? [[String: Any]] ?? []
+                    func browseId(_ run: [String: Any]) -> String? {
+                        ((run["navigationEndpoint"] as? [String: Any])?["browseEndpoint"] as? [String: Any])?["browseId"] as? String
+                    }
+                    let artistRuns = runs.filter { browseId($0)?.hasPrefix("UC") == true }
+                    let names = artistRuns.compactMap { $0["text"] as? String }
+                    guard !names.isEmpty else { return nil }
+                    return (names.joined(separator: ", "), artistRuns.first.flatMap(browseId))
+                }
+                stack.append(contentsOf: dict.values)
+            } else if let arr = obj as? [Any] {
+                stack.append(contentsOf: arr)
+            }
+        }
+        return nil
+    }
+
     // MARK: - Search Suggestions
 
     func fetchSearchSuggestions(query: String) async throws -> [String] {
@@ -1852,24 +1878,25 @@ final class YTMusicClient: NSObject, ObservableObject {
         }
         guard let header = findHeader(json) else { return nil }
 
-        for key in ["subtitle", "straplineTextOne", "description"] {
-            if let textObj = header[key] as? [String: Any],
-               let runs = textObj["runs"] as? [[String: Any]] {
-                let artistRuns = runs.filter { run in
-                    if let nav = run["navigationEndpoint"] as? [String: Any],
-                       let browse = nav["browseEndpoint"] as? [String: Any],
-                       let id = browse["browseId"] as? String,
-                       id.hasPrefix("UC") { return true }
-                    return false
-                }
-                if !artistRuns.isEmpty {
-                    return artistRuns.compactMap { $0["text"] as? String }.joined(separator: ", ")
-                }
-                let allText = runs.compactMap { $0["text"] as? String }
-                    .filter { $0 != " • " && $0 != " & " && $0 != ", " }
-                if let first = allText.first, !first.isEmpty {
-                    return first
-                }
+        // Album headers read "Album • 2006" in `subtitle` and carry the artist link in
+        // `straplineTextOne`, so an artist link on any line wins over plain text, and plain
+        // text never returns "Album" or a year (that's how whole albums became "Album").
+        let lines = ["straplineTextOne", "subtitle", "description"].compactMap {
+            (header[$0] as? [String: Any])?["runs"] as? [[String: Any]]
+        }
+        for runs in lines {
+            let artistRuns = runs.filter { run in
+                ((run["navigationEndpoint"] as? [String: Any])?["browseEndpoint"] as? [String: Any])?["browseId"]
+                    .flatMap { $0 as? String }?.hasPrefix("UC") == true
+            }
+            if !artistRuns.isEmpty {
+                return artistRuns.compactMap { $0["text"] as? String }.joined(separator: ", ")
+            }
+        }
+        for runs in lines {
+            if let first = runs.compactMap({ $0["text"] as? String })
+                .first(where: { $0 != " • " && $0 != " & " && $0 != ", " && !ArtistIndex.isPlaceholderArtist($0) }) {
+                return first
             }
         }
         return nil

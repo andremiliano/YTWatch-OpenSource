@@ -64,6 +64,7 @@ final class LibraryStore: ObservableObject {
         }
         _ = await songsTask
         saveToDisk()
+        Task { await WatchSyncManager.shared.repairArtistNames() }
     }
 
     private func fetchLibrarySongs() async {
@@ -131,7 +132,7 @@ final class LibraryStore: ObservableObject {
         let librarySongs: [Track]
     }
 
-    private func saveToDisk() {
+    func saveToDisk() {
         let cache = LibraryCache(playlists: playlists, librarySongs: librarySongs)
         guard let data = try? JSONEncoder().encode(cache) else { return }
         // Atomic so a kill mid-write can't leave truncated JSON that loses the library.

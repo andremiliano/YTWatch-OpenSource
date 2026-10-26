@@ -46,6 +46,15 @@ struct Track: Codable, Identifiable, Hashable, Sendable {
         albumId = try? c.decodeIfPresent(String.self, forKey: .albumId)
     }
 
+    /// Same track with a corrected artist (Track's fields are immutable).
+    func withArtist(_ artist: String, artistId: String?) -> Track {
+        var t = Track(id: id, videoId: videoId, title: title, artist: artist, album: album,
+                      durationSeconds: durationSeconds, thumbnailURL: thumbnailURL,
+                      artistId: artistId ?? self.artistId, albumId: albumId)
+        t.isDownloadedOnPhone = isDownloadedOnPhone
+        return t
+    }
+
     var durationFormatted: String {
         let m = durationSeconds / 60
         let s = durationSeconds % 60

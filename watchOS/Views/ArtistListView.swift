@@ -2,17 +2,16 @@ import SwiftUI
 
 /// Every artist with songs on the Watch, across all synced playlists.
 struct ArtistListView: View {
-    let artists: [ArtistGroup]
     @ObservedObject private var receiver = WatchFileReceiver.shared
-    @ObservedObject private var player = WatchPlayer.shared
     @AppStorage("artistSort") private var sort: ArtistIndex.Sort = .recent
     @State private var query = ""
 
+    // WatchPlayer is read, not observed: observing it redraws this list (and re-sorts
+    // every artist) twice a second while music plays.
     private var shown: [ArtistGroup] {
-        let onDisk = receiver.cachedOrFreshTrackIds()
-        let sorted = ArtistIndex.sorted(artists, by: sort,
-                                        recent: player.recentlyPlayed.map(\.trackVideoId),
-                                        isDownloaded: { onDisk.contains($0) })
+        let sorted = ArtistIndex.sorted(receiver.artists, by: sort,
+                                        recent: WatchPlayer.shared.recentlyPlayed.map(\.trackVideoId),
+                                        isDownloaded: { _ in true })  // the Watch list only holds songs on the Watch
         return ArtistIndex.filter(sorted, query: query)
     }
 
@@ -72,7 +71,9 @@ private struct WatchArtistRow: View {
     let artist: ArtistGroup
 
     private var thumb: UIImage? {
-        artist.tracks.lazy.compactMap { WatchThumbnailCache.shared.image(for: $0.videoId) }.first
+        // The cache doesn't remember misses, so scanning every song decoded artwork on the
+        // main thread on each redraw. Three tries is enough to find a cover.
+        artist.tracks.prefix(3).lazy.compactMap { WatchThumbnailCache.shared.image(for: $0.videoId) }.first
     }
 
     var body: some View {

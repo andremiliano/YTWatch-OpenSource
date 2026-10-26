@@ -831,6 +831,20 @@ final class AudioDownloader: NSObject, ObservableObject {
         id.range(of: "^[A-Za-z0-9_-]{8,16}$", options: .regularExpression) != nil
     }
 
+    /// Bumped when saved names change, so views that cache by download count still refresh.
+    @Published private(set) var metadataRevision = 0
+
+    /// Corrected artists for downloads saved with a placeholder like "Album".
+    func applyArtistFixes(_ fixes: [String: (artist: String, artistId: String?)]) {
+        for (id, fix) in fixes {
+            guard let m = trackMetadata[id] else { continue }
+            trackMetadata[id] = TrackMeta(title: m.title, artist: fix.artist, thumbnailURL: m.thumbnailURL,
+                                          durationSeconds: m.durationSeconds, album: m.album)
+        }
+        saveTrackMetadata()
+        metadataRevision += 1
+    }
+
     // MARK: - Persistence
 
     private func saveTrackMetadata() {

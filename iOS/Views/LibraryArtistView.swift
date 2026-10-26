@@ -4,12 +4,19 @@ import SwiftUI
 
 struct LibraryArtistsList: View {
     let artists: [ArtistGroup]
+    let artistsKey: String
     @ObservedObject private var downloader = AudioDownloader.shared
     @ObservedObject private var history = ForYouStore.shared
     @AppStorage("artistSort") private var sort: ArtistIndex.Sort = .recent
     @State private var query = ""
+    @State private var shown: [ArtistGroup] = []
 
-    private var shown: [ArtistGroup] {
+    /// Re-sort only when an input changes, never on a download progress tick.
+    private var shownKey: String {
+        "\(sort.rawValue)|\(query)|\(artistsKey)|\(artists.count)|\(history.recentlyPlayed.first?.videoId ?? "")|\(history.recentlyPlayed.count)"
+    }
+
+    private func buildShown() -> [ArtistGroup] {
         let sorted = ArtistIndex.sorted(artists, by: sort,
                                         recent: history.recentlyPlayed.map(\.videoId),
                                         isDownloaded: { downloader.isDownloaded($0) })
@@ -48,6 +55,7 @@ struct LibraryArtistsList: View {
             }
         }
         .padding(.bottom, 6)
+        .task(id: shownKey) { shown = buildShown() }
         // "Recent" ranks by YouTube Music history, which only the For You tab loads.
         .task(id: sort) {
             guard sort == .recent, history.recentlyPlayed.isEmpty else { return }
@@ -61,8 +69,8 @@ struct LibraryArtistsList: View {
             .buttonStyle(.plain)
         }
 
-        if shown.isEmpty {
-            Text(query.isEmpty ? "No artists yet" : "No artists match \"\(query)\"")
+        if artists.isEmpty || (shown.isEmpty && !query.isEmpty) {
+            Text(artists.isEmpty ? "No artists yet" : "No artists match \"\(query)\"")
                 .font(.system(size: 13))
                 .foregroundStyle(Color.appFaint)
                 .padding(.top, 24)

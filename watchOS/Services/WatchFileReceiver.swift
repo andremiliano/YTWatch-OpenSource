@@ -27,7 +27,19 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     @Published var syncedTrackCount = 0
     @Published var syncTotalCount = 0
     /// Cached available playlists — only tracks with files on disk. Call `refreshAvailable()` to update.
-    @Published private(set) var cachedAvailablePlaylists: [Playlist] = []
+    @Published private(set) var cachedAvailablePlaylists: [Playlist] = [] {
+        didSet { _artists = nil }
+    }
+    private var _artists: [ArtistGroup]?
+
+    /// Artists across every song on the Watch, regrouped only when the library changes:
+    /// views read this from bodies that redraw twice a second while music plays.
+    var artists: [ArtistGroup] {
+        if let cached = _artists { return cached }
+        let groups = ArtistIndex.group(cachedAvailablePlaylists.flatMap(\.tracks))
+        _artists = groups
+        return groups
+    }
     private var _cachedTrackIds: Set<String>?
 
     private let fm = FileManager.default
@@ -762,11 +774,7 @@ final class WatchFileReceiver: NSObject, ObservableObject {
     /// Merge tracks from source into target. Preserves target's id+title, adds unique videoIds.
     /// Uses target's thumbnail if present, else source's.
     private func mergeTracks(into target: Playlist, from source: Playlist) -> Playlist {
-        var combined = target.tracks
-        let existingIds = Set(target.tracks.map(\.videoId))
-        for track in source.tracks where !existingIds.contains(track.videoId) {
-            combined.append(track)
-        }
+        let combined = LibraryReconciler.mergedTracks(local: target.tracks, incoming: source.tracks)
         let thumb: String?
         if let t = target.thumbnailURL, !t.isEmpty {
             thumb = t

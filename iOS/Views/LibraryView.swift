@@ -8,8 +8,17 @@ struct LibraryView: View {
     @State private var appeared = false
     @State private var showArtists = false
 
+    @State private var artistGroups: [ArtistGroup] = []
+
+    /// Changes only when what the artist list is built from changes. The body redraws on
+    /// every download progress tick, and regrouping the whole library on each one stalled
+    /// the app during big downloads.
+    private var artistsKey: String {
+        "\(store.playlists.count)|\(store.playlists.reduce(0) { $0 + $1.tracks.count })|\(store.librarySongs.count)|\(downloader.downloadedTracks.count)|\(downloader.metadataRevision)"
+    }
+
     /// Everything you have: playlist tracks, Library Songs, and loose downloads (search, home).
-    private var artists: [ArtistGroup] {
+    private func buildArtists() -> [ArtistGroup] {
         let downloads = downloader.downloadedTracks.keys.sorted().compactMap { id -> Track? in
             guard let m = downloader.trackMetadata[id] else { return nil }
             return Track(id: id, videoId: id, title: m.title, artist: m.artist, album: m.album,
@@ -65,9 +74,14 @@ struct LibraryView: View {
                             }
                             .pickerStyle(.segmented)
                             .padding(.bottom, 10)
+                            // On the picker (one view): on LibraryArtistsList, whose body is
+                            // several views, SwiftUI would run it once per row.
+                            .task(id: showArtists ? artistsKey : "") {
+                                if showArtists { artistGroups = buildArtists() }
+                            }
 
                             if showArtists {
-                                LibraryArtistsList(artists: artists)
+                                LibraryArtistsList(artists: artistGroups, artistsKey: artistsKey)
                             } else {
                             if !store.librarySongs.isEmpty {
                                 NavigationLink(destination: PlaylistDetailView(playlist: Playlist(

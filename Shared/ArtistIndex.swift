@@ -16,7 +16,20 @@ enum ArtistIndex {
     static func names(in artist: String) -> [String] {
         artist.components(separatedBy: ", ")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0 != "Unknown" }
+            .filter { !isPlaceholderArtist($0) }
+    }
+
+    private static let placeholderWords: Set<String> = [
+        "", "album", "ep", "single", "playlist", "song", "video", "unknown", "unknown artist"
+    ]
+
+    /// Text that ended up in an artist field but isn't an artist: an album page's
+    /// "Album • 2006" header used to be read as the artist, so whole albums were "Album".
+    static func isPlaceholderArtist(_ artist: String) -> Bool {
+        let a = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        if placeholderWords.contains(a.lowercased()) { return true }
+        // ponytail: a release year; an artist named only 4 digits would be hidden too.
+        return a.count == 4 && a.allSatisfy(\.isNumber)
     }
 
     /// Tracks dedupe by videoId (first occurrence wins) and keep their input order

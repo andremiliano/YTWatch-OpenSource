@@ -378,6 +378,8 @@ final class YTMusicClient: NSObject, ObservableObject {
         var topSongs: [Track]
         var albums: [Playlist]
         var singles: [Playlist]
+        var playlists: [Playlist] = []        // "Playlists by …", "Featured on"
+        var relatedArtists: [Playlist] = []   // "Fans might also like"; id is the channel (UC…)
     }
 
     func fetchArtist(channelId: String) async throws -> ArtistPage {
@@ -392,6 +394,8 @@ final class YTMusicClient: NSObject, ObservableObject {
         var topSongs: [Track] = []
         var albums: [Playlist] = []
         var singles: [Playlist] = []
+        var playlists: [Playlist] = []
+        var relatedArtists: [Playlist] = []
 
         func findHeader(_ obj: Any, depth: Int = 0) -> [String: Any]? {
             guard depth < 15 else { return nil }
@@ -448,14 +452,17 @@ final class YTMusicClient: NSObject, ObservableObject {
 
                     if let contents = carousel["contents"] as? [Any] {
                         for item in contents {
+                            // Sort by what each item links to, not the shelf title: anything
+                            // unrecognised used to land in Albums, so "Fans might also like"
+                            // artists and "Playlists by …" showed up as albums.
                             if let r = (item as? [String: Any])?["musicTwoRowItemRenderer"] as? [String: Any],
                                let p = parsePlaylistRenderer(r) {
-                                if titleText.lowercased().contains("single") {
-                                    singles.append(p)
-                                } else if titleText.lowercased().contains("album") {
-                                    albums.append(p)
+                                if p.id.hasPrefix("UC") {
+                                    relatedArtists.append(p)
+                                } else if p.id.hasPrefix("MPRE") || p.id.hasPrefix("OLAK") {
+                                    if titleText.lowercased().contains("single") { singles.append(p) } else { albums.append(p) }
                                 } else {
-                                    albums.append(p)
+                                    playlists.append(p)
                                 }
                             }
                         }
@@ -474,7 +481,9 @@ final class YTMusicClient: NSObject, ObservableObject {
             subscriberCount: subscriberCount,
             topSongs: topSongs,
             albums: albums,
-            singles: singles
+            singles: singles,
+            playlists: playlists,
+            relatedArtists: relatedArtists
         )
     }
 

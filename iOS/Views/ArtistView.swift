@@ -106,6 +106,48 @@ struct ArtistView: View {
                                     value: appeared
                                 )
                             }
+
+                            if !artist.playlists.isEmpty {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Playlists")
+                                        .sectionHeader()
+                                        .padding(.horizontal, 20)
+
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        LazyHStack(spacing: 14) {
+                                            ForEach(artist.playlists) { playlist in
+                                                NavigationLink(destination: PlaylistDetailView(playlist: playlist)) {
+                                                    ArtistAlbumCard(playlist: playlist)
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+                                        }
+                                        .padding(.horizontal, 16)
+                                    }
+                                }
+                            }
+
+                            if !artist.relatedArtists.isEmpty {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Fans also like")
+                                        .sectionHeader()
+                                        .padding(.horizontal, 20)
+
+                                    ScrollView(.horizontal, showsIndicators: false) {
+                                        LazyHStack(alignment: .top, spacing: 14) {
+                                            ForEach(artist.relatedArtists) { related in
+                                                Button {
+                                                    artistTarget = (related.id, related.title)
+                                                } label: {
+                                                    RelatedArtistCard(artist: related)
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+                                        }
+                                        .padding(.horizontal, 16)
+                                    }
+                                }
+                            }
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 16)
@@ -251,6 +293,28 @@ private struct ArtistHero: View {
 }
 
 // MARK: - Album Card
+
+private struct RelatedArtistCard: View {
+    let artist: Playlist  // id is the channel; subtitle is e.g. "456K monthly audience"
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ThumbnailView(url: artist.thumbnailURL, size: 110, cornerRadius: 55)
+            Text(artist.title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if let subtitle = artist.subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color.appFaint)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(width: 120)
+    }
+}
 
 private struct ArtistAlbumCard: View {
     let playlist: Playlist

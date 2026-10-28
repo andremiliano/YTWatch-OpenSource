@@ -110,6 +110,7 @@ private struct LibraryArtistRow: View {
 
 struct LibraryArtistView: View {
     let artist: ArtistGroup
+    @State private var artistTarget: (id: String, name: String)?
 
     /// Albums you have at least one song from, in first-seen order.
     private var albums: [Playlist] {
@@ -176,7 +177,8 @@ struct LibraryArtistView: View {
                     Text("Songs").sectionHeader()
                     LazyVStack(spacing: 1) {
                         ForEach(artist.tracks) { track in
-                            TrackRow(track: track, playlistId: "library", playlistTitle: "Downloads")
+                            TrackRow(track: track, playlistId: "library", playlistTitle: "Downloads",
+                                     onNavigateToArtist: { id, name in artistTarget = (id, name) })
                         }
                     }
                 }
@@ -186,6 +188,14 @@ struct LibraryArtistView: View {
             .padding(.bottom, 40)
         }
         .background(Color.appBg.ignoresSafeArea())
+        .navigationDestination(isPresented: Binding(
+            get: { artistTarget != nil },
+            set: { if !$0 { artistTarget = nil } }
+        )) {
+            if let target = artistTarget {
+                ArtistView(channelId: target.id, artistName: target.name)
+            }
+        }
         .navigationTitle(artist.name)
         .navigationBarTitleDisplayMode(.large)
         .toolbarBackground(Color.appBg, for: .navigationBar)

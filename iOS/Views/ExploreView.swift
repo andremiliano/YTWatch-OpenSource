@@ -426,23 +426,7 @@ private struct ExploreTrackRow: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                if let artistId = track.artistId, onNavigateToArtist != nil {
-                    Button {
-                        onNavigateToArtist?(artistId, track.artist)
-                    } label: {
-                        Text(track.artist)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.appFaint)
-                            .lineLimit(1)
-                            .underline(color: Color.appFaint.opacity(0.3))
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text(track.artist)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.appFaint)
-                        .lineLimit(1)
-                }
+                ArtistNameButton(track: track, onNavigate: onNavigateToArtist)
             }
 
             Spacer()

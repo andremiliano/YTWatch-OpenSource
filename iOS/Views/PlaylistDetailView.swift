@@ -378,6 +378,50 @@ private struct FloatingActionBar: View {
 
 // MARK: - Track Row
 
+/// Artist name under a song; tapping it opens the artist's profile. Songs that don't
+/// carry the artist's channel (album tracks, older downloads, home items) look it up
+/// first, so every name is tappable, not only the ones that came with a link.
+struct ArtistNameButton: View {
+    let track: Track
+    let onNavigate: ((String, String) -> Void)?
+    @State private var resolving = false
+
+    var body: some View {
+        let name = Text(track.artist)
+            .font(.system(size: 12))
+            .foregroundStyle(Color.appFaint)
+            .lineLimit(1)
+        if let onNavigate {
+            Button {
+                if let id = track.artistId {
+                    onNavigate(id, track.artist)
+                    return
+                }
+                guard !resolving else { return }
+                resolving = true
+                Task {
+                    let found = await YTMusicClient.shared.fetchSongArtist(videoId: track.videoId)
+                    resolving = false
+                    if let found, let id = found.artistId {
+                        // Collabs come back as "A, B"; the channel is the first artist's.
+                        onNavigate(id, found.artist.components(separatedBy: ", ").first ?? found.artist)
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    name.underline(color: Color.appFaint.opacity(0.3))
+                    if resolving {
+                        ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+        } else {
+            name
+        }
+    }
+}
+
 struct TrackRow: View {
     let track: Track
     var playlistId: String?
@@ -430,23 +474,7 @@ struct TrackRow: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                if let artistId = track.artistId, onNavigateToArtist != nil {
-                    Button {
-                        onNavigateToArtist?(artistId, track.artist)
-                    } label: {
-                        Text(track.artist)
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.appFaint)
-                            .lineLimit(1)
-                            .underline(color: Color.appFaint.opacity(0.3))
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text(track.artist)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.appFaint)
-                        .lineLimit(1)
-                }
+                ArtistNameButton(track: track, onNavigate: onNavigateToArtist)
             }
 
             Spacer()

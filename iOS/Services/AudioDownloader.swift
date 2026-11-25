@@ -129,9 +129,13 @@ final class AudioDownloader: NSObject, ObservableObject {
         let bgConfig = URLSessionConfiguration.background(withIdentifier: Self.backgroundSessionId)
         bgConfig.isDiscretionary = false
         bgConfig.sessionSendsLaunchEvents = true
-        bgConfig.timeoutIntervalForResource = 600
+        // The resource timeout runs from when a task is queued, not when it starts. With a
+        // big batch, or while iOS holds background transfers back, songs at the back of the
+        // queue passed the old 10 minutes before downloading a byte and failed. Stream links
+        // last 6 hours, so 3 hours is safe; a song that still fails is retried with a fresh link.
+        bgConfig.timeoutIntervalForResource = 3 * 60 * 60
         bgConfig.timeoutIntervalForRequest = 120
-        bgConfig.httpMaximumConnectionsPerHost = 2
+        bgConfig.httpMaximumConnectionsPerHost = 4
         bgSession = URLSession(configuration: bgConfig, delegate: self, delegateQueue: nil)
 
         // Foreground session for stream URL resolution (fast API calls)

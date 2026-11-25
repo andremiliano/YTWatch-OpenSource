@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import WatchConnectivity
 import UserNotifications
 
@@ -37,9 +38,15 @@ final class WatchSyncManager: NSObject, ObservableObject {
     private var wifiTimeoutTasks: [String: Task<Void, Never>] = [:]
     /// VideoIds that failed WiFi download — forces Bluetooth path until next reachability change
     private var wifiFailedVideoIds: Set<String> = []
-    /// Max tracks in-flight at once (WiFi + Bluetooth combined). Kept modest so we
-    /// never ask the memory-constrained Watch to juggle many downloads at once.
-    private static let maxConcurrentSyncTransfers = 5
+    /// Songs the Watch downloads itself at once (Watch app open). Memory-heavy on the
+    /// Watch, so kept small.
+    private static let maxConcurrentDirectDownloads = 5
+    /// Songs handed to WatchConnectivity's queue at once. iOS keeps sending those while
+    /// this app is suspended and the Watch app is closed (e.g. on the charger), but the
+    /// queue is only refilled while this app runs, so a cap of 5 meant only 5 songs could
+    /// move per app session. The Watch takes them as files one at a time and saves its
+    /// library once per burst, and still confirms each song it actually saved.
+    private static let maxQueuedFileTransfers = 25
 
     struct PendingSyncItem: Codable {
         let videoId: String
@@ -61,6 +68,12 @@ final class WatchSyncManager: NSObject, ObservableObject {
             s.delegate = self
             s.activate()
             session = s
+        }
+        // Top the Watch queue back up whenever the app comes back: while it was suspended,
+        // transfers finished but nothing refilled the queue.
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.drainPendingQueue() }
         }
     }
 
@@ -348,7 +361,7 @@ final class WatchSyncManager: NSObject, ObservableObject {
         isVerifying = false
         print("[Sync] Verify done: queued \(newItems.count) re-syncs (cap=\(Self.maxResyncPerVerify), drift=\(falseSynced.count))")
 
-        // Trigger one drain to start the batch — drain itself caps at maxConcurrentSyncTransfers (10)
+        // Trigger one drain to start the batch — drain itself caps how many go at once
         if !newItems.isEmpty {
             drainPendingQueue()
         }
@@ -364,8 +377,10 @@ final class WatchSyncManager: NSObject, ObservableObject {
         pendingSyncQueue.removeAll { syncedTrackIds.contains($0.videoId) }
         if pendingSyncQueue.count != beforeCount { savePendingQueue() }
 
-        // Batch limit — don't overwhelm Watch with 200+ concurrent transfers
-        let slotsAvailable = Self.maxConcurrentSyncTransfers - transferringTrackIds.count
+        // Batch limit — don't overwhelm Watch with 200+ concurrent transfers. A reachable
+        // Watch downloads songs itself (direct path), otherwise they queue as file transfers.
+        let limit = session?.isReachable == true ? Self.maxConcurrentDirectDownloads : Self.maxQueuedFileTransfers
+        let slotsAvailable = limit - transferringTrackIds.count
         guard slotsAvailable > 0 else { return }
 
         // Build transfer list — items STAY in queue until confirmed synced
